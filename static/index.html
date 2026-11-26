@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en" data-theme="ink">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chuck</title>
+<script>
+  document.documentElement.dataset.theme = localStorage.getItem("chuck-theme") || "ink";
+</script>
+<style>
+  /* Fonts are system stacks only: nothing is loaded from the network. */
+  :root {
+    --ui: "Inter Tight", "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --amber: #fde68a; --amber-strong: #fbbf24;
+  }
+  [data-theme="ink"] {
+    --bg: #eae8e3; --card: #fff; --field: #fff; --tx: #111; --mu: #8a8a8a; --edge: #111; --bw: 2px;
+    --on-bg: #111; --on-tx: #fff; --shadow: none; --radius: 14px; --fw: 500; color-scheme: light;
+  }
+  [data-theme="light"] {
+    --bg: #fff; --card: #f5f5f5; --field: #f1f1f1; --tx: #101012; --mu: #737373; --edge: rgba(0,0,0,.12); --bw: 1px;
+    --on-bg: #1a1a1a; --on-tx: #fff; --shadow: 0 1px 2px rgba(0,0,0,.06); --radius: 14px; --fw: 400; color-scheme: light;
+  }
+  [data-theme="dark"] {
+    --bg: #0a0a0a; --card: #171717; --field: #1f1f1f; --tx: #f5f5f5; --mu: #8f8f8f; --edge: #2c2c2c; --bw: 1px;
+    --on-bg: #f5f5f5; --on-tx: #111; --shadow: none; --radius: 14px; --fw: 400; color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--tx); font: var(--fw) 15px/1.5 var(--ui); letter-spacing: -.011em; }
+  .wrap { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 28px; max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
+  @media (max-width: 680px) { .wrap { grid-template-columns: 1fr; } }
+
+  .label { font: 500 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .18em; color: var(--mu); }
+  h1 { font-size: 20px; margin: 0 0 16px; letter-spacing: -.03em; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .seg { display: inline-flex; border: var(--bw) solid var(--edge); border-radius: 999px; padding: 3px; gap: 2px; }
+  .seg button { border: 0; padding: 4px 10px; border-radius: 999px; font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .12em; background: transparent; color: var(--tx); cursor: pointer; }
+  .seg button.on { background: var(--on-bg); color: var(--on-tx); }
+
+  .pill { display: flex; align-items: center; gap: 8px; padding: 5px 12px; margin: 0 0 6px; border-radius: 999px;
+          border: var(--bw) solid var(--edge); background: var(--card); color: var(--tx); font: 500 13px var(--ui); cursor: pointer; width: 100%; text-align: left; }
+  .pill .n { font: 500 11px var(--mono); opacity: .7; }
+  .pill .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pill .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); border: var(--bw) solid var(--edge); flex: none; }
+  .pill.on { background: var(--accent, var(--on-bg)); color: var(--accent-ink, var(--on-tx)); }
+  .pill.on .dot { background: var(--accent-ink); border-color: transparent; }
+  .pill.rem { --accent: var(--amber); --accent-ink: #111; }
+
+  textarea, input, select { width: 100%; font: inherit; padding: 10px 12px; border: var(--bw) solid var(--edge); border-radius: 12px; background: var(--field); color: var(--tx); outline: none; }
+  textarea:focus, input:focus, select:focus { border-color: var(--tx); }
+  ::placeholder { color: var(--mu); }
+  textarea { resize: vertical; min-height: 84px; }
+  .row { display: flex; gap: 8px; margin: 10px 0; align-items: center; flex-wrap: wrap; }
+  .row > input[type=date], .row > input[type=datetime-local], .row > select { width: auto; flex: none; font-family: var(--mono); font-size: 12px; }
+  .row > input[type=search], .row > input:not([type]) { flex: 1; min-width: 140px; }
+  button.btn { font: 600 13px var(--ui); padding: 7px 16px; border: var(--bw) solid var(--edge); border-radius: 999px; background: var(--field); color: var(--tx); cursor: pointer; }
+  button.btn.primary { background: var(--on-bg); color: var(--on-tx); }
+  button.btn.sm { padding: 3px 10px; font-size: 12px; }
+  button.btn:active { transform: scale(.97); }
+  .hint { color: var(--mu); font: 500 11px var(--mono); }
+  .err { color: #b91c1c; font: 500 12px var(--mono); }
+
+  /* Cards */
+  .note { border: var(--bw) solid var(--edge); border-radius: var(--radius); background: var(--card); margin: 12px 0; box-shadow: var(--shadow); overflow: hidden; }
+  .note .head { background: var(--accent); color: var(--accent-ink); padding: 6px 14px; display: flex; gap: 8px; align-items: center; justify-content: space-between;
+                font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .14em; border-bottom: var(--bw) solid var(--edge); }
+  .note.plain .head { background: transparent; color: var(--mu); }
+  .note .content { padding: 12px 14px; }
+  .note .body { white-space: pre-wrap; word-break: break-word; }
+  .note .body.clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 10; overflow: hidden; }
+  .note .acts { display: flex; gap: 4px; }
+  .note .acts button, .linkbtn { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; text-transform: inherit; letter-spacing: inherit; padding: 2px 6px; border-radius: 6px; opacity: .75; }
+  .note .acts button:hover, .linkbtn:hover { opacity: 1; text-decoration: underline; }
+  .linkbtn { color: var(--mu); font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .12em; padding: 0; margin-top: 6px; }
+  .tag { cursor: pointer; font-weight: 600; background: var(--accent); color: var(--accent-ink); border-radius: 999px; padding: 0 8px; }
+  .empty { color: var(--mu); text-align: center; padding: 32px 0; font: 500 12px var(--mono); text-transform: uppercase; letter-spacing: .14em; }
+
+  /* Checklist */
+  .progress { display: inline-flex; align-items: center; gap: 6px; }
+  .progress .bar2 { width: 46px; height: 6px; border-radius: 999px; border: var(--bw) solid currentColor; overflow: hidden; }
+  .progress .bar2 i { display: block; height: 100%; background: currentColor; }
+  .item { display: flex; gap: 10px; align-items: flex-start; padding: 3px 0; }
+  .box { flex: none; width: 20px; height: 20px; margin-top: 2px; border: 2px solid var(--tx); border-radius: 5px; background: transparent; color: var(--bg); cursor: pointer; display: grid; place-items: center; padding: 0; font: 700 13px/1 var(--ui); }
+  .item.done .box { background: var(--tx); }
+  .item.done .txt { text-decoration: line-through; color: var(--mu); }
+  .txt { word-break: break-word; white-space: pre-wrap; flex: 1; }
+  .additem { margin-top: 8px; padding: 6px 10px; font-size: 14px; border-style: dashed; }
+
+  /* Reminders */
+  .rem-chip { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; background: var(--amber); color: #111; border: 2px solid #111; border-radius: 12px; padding: 4px 10px; margin-bottom: 8px; font: 600 12px var(--mono); }
+  .rem-chip.due { background: var(--amber-strong); }
+  .rem-chip.sent { background: transparent; color: var(--mu); border-color: var(--edge); border-width: var(--bw); }
+  .rem-chip button { border: 2px solid #111; border-radius: 999px; background: #fff; color: #111; font: 600 11px var(--mono); padding: 1px 8px; cursor: pointer; }
+  .toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 10; max-width: 340px; }
+  .toast { background: var(--amber); color: #111; border: 2px solid #111; border-radius: 14px; padding: 10px 12px; font-weight: 600; }
+  .toast .row { margin: 8px 0 0; }
+  .toast button { border: 2px solid #111; border-radius: 999px; background: #fff; color: #111; font: 600 12px var(--ui); padding: 3px 12px; cursor: pointer; }
+
+  /* Board: one column per tag, scrolls sideways, snaps to columns */
+  .boardwrap { position: relative; }
+  .strip { display: flex; gap: 14px; overflow-x: auto; scroll-snap-type: x proximity; overscroll-behavior-x: contain; padding-bottom: 12px; align-items: flex-start; scrollbar-width: thin; }
+  .col { flex: 0 0 290px; scroll-snap-align: start; scroll-snap-stop: always; display: flex; flex-direction: column; max-height: 72vh; }
+  .colhead { background: var(--accent, var(--on-bg)); color: var(--accent-ink, var(--on-tx)); border: var(--bw) solid var(--edge); border-radius: 12px; padding: 7px 12px; display: flex; justify-content: space-between;
+             font: 600 12px var(--mono); text-transform: uppercase; letter-spacing: .12em; flex: none; }
+  .collist { overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
+  .collist .note:first-child { margin-top: 10px; }
+  .arrows { display: flex; gap: 6px; }
+  .arrows button { width: 30px; height: 30px; border-radius: 8px; border: var(--bw) solid var(--edge); background: var(--field); color: var(--tx); cursor: pointer; font-size: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <aside>
+    <h1>Chuck</h1>
+    <div class="label" style="margin-bottom:8px">Filter</div>
+    <div id="tags"></div>
+  </aside>
+  <main>
+    <div class="bar">
+      <div class="seg" id="views" role="group" aria-label="View"><button data-v="feed">Feed</button><button data-v="board">Board</button></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn sm" id="notify" hidden>Enable alerts</button>
+        <div class="seg" id="themes" role="group" aria-label="Theme"><button data-t="dark">Dark</button><button data-t="ink">Ink</button><button data-t="light">Light</button></div>
+      </div>
+    </div>
+
+    <div class="seg" id="modes" role="group" aria-label="Capture type" style="margin-bottom:8px">
+      <button data-m="note">Note</button><button data-m="list">List</button><button data-m="reminder">Reminder</button>
+    </div>
+    <div id="composer"></div>
+
+    <div class="row">
+      <input id="q" placeholder="Search">
+      <input id="from" type="date" title="From"><input id="to" type="date" title="To">
+    </div>
+    <div id="out"></div>
+    <div class="row"><button class="btn" id="more" hidden>Load more</button></div>
+  </main>
+</div>
+<div class="toasts" id="toasts"></div>
+<script>
+const $ = id => document.getElementById(id);
+const PAGE = 50, BOARD_MAX = 200;
+let filter = "";            // "" | tag name | "@reminders"
+let view = localStorage.getItem("chuck-view") || "feed";
+let mode = "note";
+let offset = 0;
+
+/* ---------- helpers ---------- */
+const PALETTE = ["#0ea5e9","#22c55e","#f59e0b","#ef4444","#f43f5e","#14b8a6","#f97316","#06b6d4","#84cc16","#d946ef","#94a3b8","#FB7185","#FDBA74","#A3E635","#C4B5FD"];
+function accent(t) { let h = 5381; for (const c of t) h = ((h << 5) + h + c.codePointAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; }
+function paint(node, t) { node.style.setProperty("--accent", accent(t)); node.style.setProperty("--accent-ink", "#111"); }
+
+async function api(path, opts) {
+  const r = await fetch(path, { headers: { "content-type": "application/json" }, ...opts });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+  return r.status === 204 ? null : r.json();
+}
+// DOM is built with textContent only; note bodies are never injected as HTML.
+function el(tag, props = {}, ...kids) { const e = Object.assign(document.createElement(tag), props); kids.forEach(k => e.append(k)); return e; }
+const put = (n, patch) => api("/api/notes/" + n.id, { method: "PUT", body: JSON.stringify({ body: n.body, ...patch }) });
+
+const pad = x => String(x).padStart(2, "0");
+const toLocalInput = sec => { const d = new Date(sec * 1000); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const fromLocalInput = v => v ? Math.floor(new Date(v).getTime() / 1000) : 0;
+const fmtWhen = sec => new Date(sec * 1000).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
+/* ---------- checklist parsing ---------- */
+const ITEM = /^(\s*[-*]\s+\[)([ xX])(\]\s?)(.*)$/;
+const isList = body => body.split("\n").some(l => ITEM.test(l));
+function listStats(body) {
+  let total = 0, done = 0;
+  body.split("\n").forEach(l => { const m = ITEM.exec(l); if (m) { total++; if (m[2] !== " ") done++; } });
+  return { total, done };
+}
+
+/* ---------- reminder time parsing and recurrence ---------- */
+const DAYS = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
+function nextOccurrence(atSec, repeat, nowMs = Date.now()) {
+  const d = new Date(atSec * 1000);
+  for (let i = 0; i < 4000 && d.getTime() <= nowMs; i++) {
+    if (repeat === "daily") d.setDate(d.getDate() + 1);
+    else if (repeat === "weekdays") { do d.setDate(d.getDate() + 1); while ([0, 6].includes(d.getDay())); }
+    else if (repeat === "weekly") d.setDate(d.getDate() + 7);
+    else if (repeat === "monthly") d.setMonth(d.getMonth() + 1);
+    else break;
+  }
+  return Math.floor(d.getTime() / 1000);
+}
+// Understands: "in 30 minutes", "at 3pm", "tomorrow at 9am", "friday 2:30pm", "every monday at 8am", "every day", "daily".
+function parseWhen(text) {
+  const t = text.toLowerCase(), now = new Date();
+  const rel = /\bin\s+(\d+)\s*(min|mins|minutes?|hours?|hrs?|days?|weeks?)\b/.exec(t);
+  if (rel) {
+    const n = +rel[1], u = rel[2];
+    const ms = /^min/.test(u) ? n * 6e4 : /^(h)/.test(u) ? n * 36e5 : /^d/.test(u) ? n * 864e5 : n * 6048e5;
+    return { at: Math.floor((now.getTime() + ms) / 1000), repeat: "" };
+  }
+  const tm = /\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/.exec(t) || /\bat\s+(\d{1,2}):(\d{2})()\b/.exec(t);
+  const every = /\bevery\s+(day|weekday|weekdays|week|month|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/.exec(t);
+  const dayName = every && DAYS.includes(every[1]) ? every[1] : (/\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/.exec(t) || [])[1];
+  const tomorrow = /\btomorrow\b/.test(t);
+  const daily = /\bdaily\b/.test(t);
+  if (!tm && !every && !dayName && !tomorrow && !daily) return null;
+
+  let h = 9, m = 0;
+  if (tm) {
+    h = +tm[1]; m = tm[2] ? +tm[2] : 0;
+    if (tm[3] === "pm" && h < 12) h += 12;
+    if (tm[3] === "am" && h === 12) h = 0;
+    if (h > 23 || m > 59) return null;
+  }
+  let repeat = "";
+  if (daily || (every && every[1] === "day")) repeat = "daily";
+  else if (every && /^weekdays?$/.test(every[1])) repeat = "weekdays";
+  else if (every && (every[1] === "week" || DAYS.includes(every[1]))) repeat = "weekly";
+  else if (every && every[1] === "month") repeat = "monthly";
+
+  const d = new Date(now); d.setHours(h, m, 0, 0);
+  if (tomorrow) d.setDate(d.getDate() + 1);
+  if (dayName) {
+    let ahead = (DAYS.indexOf(dayName) - now.getDay() + 7) % 7;
+    if (ahead === 0 && d.getTime() <= now.getTime()) ahead = 7;
+    d.setDate(d.getDate() + ahead);
+  }
+  let at = Math.floor(d.getTime() / 1000);
+  if (at * 1000 <= now.getTime()) at = repeat ? nextOccurrence(at, repeat) : at + 86400;
+  return { at, repeat };
+}
+
+/* ---------- reminder field group (used by composer and editor) ---------- */
+function whenFields(note) {
+  const when = el("input", { type: "datetime-local", title: "Remind at" });
+  const rep = el("select", { title: "Repeat" });
+  [["", "No repeat"], ["daily", "Daily"], ["weekdays", "Weekdays"], ["weekly", "Weekly"], ["monthly", "Monthly"]]
+    .forEach(([v, l]) => rep.append(el("option", { value: v, textContent: l })));
+  if (note && note.remind_at) { when.value = toLocalInput(note.remind_at); rep.value = note.repeat || ""; }
+  const quick = (label, fn) => el("button", { className: "btn sm", type: "button", textContent: label, onclick: () => { when.value = toLocalInput(fn()); } });
+  const inMin = n => () => Math.floor(Date.now() / 1000) + n * 60;
+  const tomorrow9 = () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); return Math.floor(d / 1000); };
+  const node = el("div", { className: "row" }, when, rep, quick("+30m", inMin(30)), quick("+1h", inMin(60)), quick("Tomorrow 9am", tomorrow9));
+  return { node, value: () => ({ remind_at: fromLocalInput(when.value), repeat: rep.value }), has: () => !!when.value, setFrom: p => { when.value = toLocalInput(p.at); rep.value = p.repeat; } };
+}
+
+/* ---------- composer ---------- */
+function renderComposer() {
+  const box = $("composer");
+  const ta = el("textarea", { placeholder: "Capture something. Use #tags. Ctrl/Cmd+Enter to save." });
+  const msg = el("div", { className: "err" });
+  let extra = null, items = null, title = null, kids = [];
+  if (mode === "list") {
+    title = el("input", { placeholder: "List title, e.g. Groceries #home" });
+    items = el("textarea", { placeholder: "One item per line" });
+    kids = [title, el("div", { style: "height:8px" }), items];
+  } else if (mode === "reminder") {
+    ta.placeholder = "e.g. remind me at 3pm to call Bob, or every Monday at 8am standup. Or pick a time below.";
+    extra = whenFields();
+    kids = [ta, extra.node, el("div", { className: "hint", textContent: "Reminders alert while Chuck is open in a browser tab." })];
+  } else kids = [ta];
+
+  const save = async () => {
+    msg.textContent = "";
+    let body, patch = {};
+    if (mode === "list") {
+      const lines = items.value.split("\n").map(s => s.trim()).filter(Boolean);
+      if (!lines.length) { msg.textContent = "Add at least one item."; return; }
+      body = [title.value.trim(), ...lines.map(l => "- [ ] " + l.replace(/^[-*]\s*(\[[ xX]\]\s*)?/, ""))].filter(Boolean).join("\n");
+    } else {
+      body = ta.value.trim();
+      if (!body) return;
+    }
+    if (mode === "reminder") {
+      let v = extra.value();
+      if (!v.remind_at) {
+        const p = parseWhen(body);
+        if (!p) { msg.textContent = "Couldn't read a time. Pick one below."; return; }
+        v = { remind_at: p.at, repeat: p.repeat };
+      }
+      patch = v;
+    }
+    try { await api("/api/notes", { method: "POST", body: JSON.stringify({ body, ...patch }) }); }
+    catch (e) { msg.textContent = e.message; return; }
+    renderComposer(); refresh();
+  };
+  ta.addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) save(); });
+  box.replaceChildren(...kids, el("div", { className: "row" }, el("button", { className: "btn primary", textContent: "Save", onclick: save }), msg));
+}
+
+/* ---------- note card ---------- */
+function renderText(text) {
+  const frag = document.createDocumentFragment();
+  text.split(/(#[\p{L}\p{N}_-]+)/gu).forEach(part => {
+    if (/^#[\p{L}\p{N}_-]+$/u.test(part)) {
+      const t = part.slice(1).toLowerCase();
+      const s = el("span", { className: "tag", textContent: part, onclick: () => pick(t) });
+      paint(s, t); frag.append(s);
+    } else frag.append(part);
+  });
+  return frag;
+}
+
+function bodyEl(n, card) {
+  const box = el("div", { className: "body" });
+  const lines = n.body.split("\n");
+  let pending = [];
+  const flush = () => { if (pending.length) { box.append(el("div", { className: "txtblock" }, renderText(pending.join("\n")))); pending = []; } };
+  lines.forEach((line, i) => {
+    const m = ITEM.exec(line);
+    if (!m) { pending.push(line); return; }
+    flush();
+    const done = m[2] !== " ";
+    const cb = el("button", { className: "box", type: "button", textContent: done ? "✓" : "", title: done ? "Mark not done" : "Mark done", "aria-pressed": String(done),
+      onclick: async () => {
+        const l = n.body.split("\n");
+        l[i] = l[i].replace(/\[( |x|X)\]/, done ? "[ ]" : "[x]");
+        try { const up = await put({ ...n, body: l.join("\n") }, {}); card.replaceWith(noteEl(up, card.classList.contains("compact"))); }
+        catch (e) { alert(e.message); }
+      } });
+    box.append(el("div", { className: "item" + (done ? " done" : "") }, cb, el("span", { className: "txt" }, renderText(m[4]))));
+  });
+  flush();
+  return box;
+}
+
+function reminderChip(n, card) {
+  const now = Date.now(), due = n.remind_at * 1000 <= now && !n.reminder_done;
+  const label = n.reminder_done ? "Reminded " + fmtWhen(n.remind_at) : (due ? "Due " : "") + fmtWhen(n.remind_at);
+  const chip = el("div", { className: "rem-chip" + (due ? " due" : "") + (n.reminder_done ? " sent" : "") });
+  chip.append("🔔 " + label + (n.repeat ? " · " + n.repeat : ""));
+  const act = (text, fn) => chip.append(el("button", { type: "button", textContent: text, onclick: async () => {
+    try { card.replaceWith(noteEl(await fn(), card.classList.contains("compact"))); loadFilters(); } catch (e) { alert(e.message); } } }));
+  if (!n.reminder_done) {
+    act("Done", () => completeReminder(n));
+    act("Snooze 10m", () => put(n, { remind_at: Math.floor(Date.now() / 1000) + 600 }));
+  } else act("Re-arm", () => put(n, { remind_at: Math.floor(Date.now() / 1000) + 3600 }));
+  return chip;
+}
+
+// Finish a reminder: repeating ones move to the next occurrence, one-offs are marked done.
+function completeReminder(n) {
+  return n.repeat ? put(n, { remind_at: nextOccurrence(n.remind_at, n.repeat) }) : put(n, { reminder_done: true });
+}
+
+function noteEl(n, compact) {
+  const card = el("div", { className: "note" + (compact ? " compact" : "") });
+  if (n.tags.length) paint(card, n.tags[0]); else card.classList.add("plain");
+  const stats = isList(n.body) ? listStats(n.body) : null;
+  const created = new Date(n.created_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  const acts = el("div", { className: "acts" },
+    el("button", { textContent: "Edit", onclick: () => edit(card, n, compact) }),
+    el("button", { textContent: "Delete", onclick: async () => {
+      if (confirm("Delete this note?")) { await api("/api/notes/" + n.id, { method: "DELETE" }); refresh(); }
+    } }));
+  const head = el("div", { className: "head" }, el("span", { textContent: created }));
+  if (stats) {
+    const pct = stats.total ? Math.round(100 * stats.done / stats.total) : 0;
+    const bar = el("span", { className: "bar2" }, el("i", { style: `width:${pct}%` }));
+    head.append(el("span", { className: "progress", title: pct + "% done" }, bar, `${stats.done}/${stats.total}`));
+  }
+  head.append(acts);
+  const content = el("div", { className: "content" });
+  if (n.remind_at) content.append(reminderChip(n, card));
+  const body = bodyEl(n, card);
+  content.append(body);
+  if (compact && (n.body.length > 400 || n.body.split("\n").length > 10)) {
+    body.classList.add("clamp");
+    const more = el("button", { className: "linkbtn", type: "button", textContent: "Show more", onclick: () => {
+      const open = body.classList.toggle("clamp"); more.textContent = open ? "Show more" : "Show less"; } });
+    content.append(more);
+  }
+  if (stats) {
+    const add = el("input", { className: "additem", placeholder: "Add item, press Enter" });
+    add.addEventListener("keydown", async e => {
+      if (e.key !== "Enter" || !add.value.trim()) return;
+      try { const up = await put({ ...n, body: n.body.replace(/\s+$/, "") + "\n- [ ] " + add.value.trim() }, {}); card.replaceWith(noteEl(up, compact)); }
+      catch (err) { alert(err.message); }
+    });
+    content.append(add);
+  }
+  card.append(head, content);
+  return card;
+}
+
+function edit(card, n, compact) {
+  const ta = el("textarea", { value: n.body });
+  const wf = whenFields(n);
+  const msg = el("div", { className: "err" });
+  const save = el("button", { className: "btn primary", textContent: "Save", onclick: async () => {
+    const v = wf.value();
+    try { await api("/api/notes/" + n.id, { method: "PUT", body: JSON.stringify({ body: ta.value, remind_at: v.remind_at || -1, repeat: v.repeat }) }); }
+    catch (e) { msg.textContent = e.message; return; }
+    refresh();
+  } });
+  card.replaceChildren(el("div", { className: "content" }, ta,
+    el("div", { className: "label", style: "margin-top:10px", textContent: "Reminder (leave blank for none)" }), wf.node,
+    el("div", { className: "row" }, save, el("button", { className: "btn", textContent: "Cancel", onclick: () => refresh() }), msg)));
+  ta.focus();
+}
+
+/* ---------- loading: feed and board ---------- */
+function params(extra = {}) {
+  const p = new URLSearchParams();
+  if ($("q").value.trim()) p.set("q", $("q").value.trim());
+  if ($("from").value) p.set("from", Math.floor(new Date($("from").value + "T00:00:00").getTime() / 1000));
+  if ($("to").value) p.set("to", Math.floor(new Date($("to").value + "T23:59:59").getTime() / 1000));
+  Object.entries(extra).forEach(([k, v]) => p.set(k, v));
+  return p;
+}
+
+async function loadFeed(reset) {
+  if (reset) { offset = 0; $("out").replaceChildren(); }
+  const extra = { limit: PAGE, offset };
+  if (filter === "@reminders") extra.reminders = "true"; else if (filter) extra.tag = filter;
+  const notes = await api("/api/notes?" + params(extra));
+  notes.forEach(n => $("out").append(noteEl(n, false)));
+  offset += notes.length;
+  if (reset && !notes.length) $("out").append(el("div", { className: "empty", textContent: filter === "@reminders" ? "No pending reminders" : "Nothing here yet" }));
+  $("more").hidden = notes.length < PAGE;
+}
+
+async function loadBoard() {
+  $("more").hidden = true;
+  const [notes, tags] = await Promise.all([api("/api/notes?" + params({ limit: BOARD_MAX })), api("/api/tags")]);
+  const cols = tags.map(t => ({ key: t.tag, title: "#" + t.tag, notes: notes.filter(n => n.tags.includes(t.tag)) }));
+  const untagged = notes.filter(n => !n.tags.length);
+  if (untagged.length) cols.push({ key: "", title: "Untagged", notes: untagged });
+  const strip = el("div", { className: "strip", tabIndex: 0 });
+  cols.filter(c => c.notes.length).forEach(c => {
+    const head = el("div", { className: "colhead" }, el("span", { textContent: c.title }), el("span", { textContent: c.notes.length }));
+    if (c.key) paint(head, c.key);
+    const list = el("div", { className: "collist" });
+    c.notes.forEach(n => list.append(noteEl(n, true)));
+    const col = el("section", { className: "col" }, head, list);
+    col.dataset.tag = c.key;
+    strip.append(col);
+  });
+  const arrows = el("div", { className: "arrows" },
+    el("button", { textContent: "‹", title: "Scroll left", onclick: () => strip.scrollBy({ left: -310, behavior: "smooth" }) }),
+    el("button", { textContent: "›", title: "Scroll right", onclick: () => strip.scrollBy({ left: 310, behavior: "smooth" }) }));
+  $("out").replaceChildren(el("div", { className: "boardwrap" },
+    el("div", { className: "bar" }, el("span", { className: "label", textContent: notes.length >= BOARD_MAX ? "Showing the newest " + BOARD_MAX + " notes" : "Board" }), arrows),
+    strip.children.length ? strip : el("div", { className: "empty", textContent: "Nothing here yet" })));
+  if (filter && filter !== "@reminders") {
+    const col = [...document.querySelectorAll(".col")].find(c => c.dataset.tag === filter);
+    if (col) col.scrollIntoView({ inline: "start", block: "nearest" });
+  }
+}
+
+async function loadFilters() {
+  const [tags, rem] = await Promise.all([api("/api/tags"), api("/api/notes?reminders=true&limit=200")]);
+  pendingReminders = rem;
+  const box = $("tags");
+  const mk = (cls, key, label, count, dot) => {
+    const b = el("button", { className: "pill " + cls + (filter === key ? " on" : ""), onclick: () => pick(key) },
+      ...(dot ? [el("span", { className: "dot" })] : []), el("span", { className: "t", textContent: label }), el("span", { className: "n", textContent: count }));
+    return b;
+  };
+  box.replaceChildren(mk("", "", "All", ""), mk("rem", "@reminders", "🔔 Reminders", rem.length));
+  tags.forEach(t => { const b = mk("", t.tag, "#" + t.tag, t.count, true); paint(b, t.tag); box.append(b); });
+}
+
+let pendingReminders = [];
+function pick(f) { filter = f; refresh(); }
+async function refresh() {
+  try {
+    await (view === "board" ? loadBoard() : loadFeed(true));
+    await loadFilters();
+  } catch (e) { $("out").replaceChildren(el("div", { className: "err", textContent: e.message })); }
+}
+
+/* ---------- reminder alerts (fire while the tab is open) ---------- */
+const fired = new Set();
+function toast(n) {
+  const t = el("div", { className: "toast" }, el("div", { textContent: "🔔 " + n.body.replace(/\s+/g, " ").slice(0, 140) }));
+  const close = () => t.remove();
+  t.append(el("div", { className: "row" },
+    el("button", { textContent: "OK", onclick: close }),
+    el("button", { textContent: "Snooze 10m", onclick: async () => { close(); await put(n, { remind_at: Math.floor(Date.now() / 1000) + 600 }); fired.delete(n.id); refresh(); } })));
+  $("toasts").append(t);
+}
+async function checkReminders() {
+  try { pendingReminders = await api("/api/notes?reminders=true&limit=200"); } catch { return; }
+  const due = pendingReminders.filter(n => n.remind_at * 1000 <= Date.now() && !fired.has(n.id + ":" + n.remind_at));
+  for (const n of due) {
+    fired.add(n.id + ":" + n.remind_at);
+    toast(n);
+    if ("Notification" in window && Notification.permission === "granted") new Notification("Chuck reminder", { body: n.body.slice(0, 200) });
+    try { await completeReminder(n); } catch {}
+  }
+  if (due.length) refresh();
+}
+function setupNotify() {
+  const b = $("notify");
+  if (!("Notification" in window) || Notification.permission !== "default") return;
+  b.hidden = false;
+  b.onclick = async () => { await Notification.requestPermission(); b.hidden = true; };
+}
+
+/* ---------- chrome: themes, views, modes ---------- */
+function mark(groupId, attr, val) { document.querySelectorAll(`#${groupId} button`).forEach(b => b.classList.toggle("on", b.dataset[attr] === val)); }
+function setTheme(t) { document.documentElement.dataset.theme = t; localStorage.setItem("chuck-theme", t); mark("themes", "t", t); }
+function setView(v) { view = v; localStorage.setItem("chuck-view", v); mark("views", "v", v); refresh(); }
+function setMode(m) { mode = m; mark("modes", "m", m); renderComposer(); }
+document.querySelectorAll("#themes button").forEach(b => b.onclick = () => setTheme(b.dataset.t));
+document.querySelectorAll("#views button").forEach(b => b.onclick = () => setView(b.dataset.v));
+document.querySelectorAll("#modes button").forEach(b => b.onclick = () => setMode(b.dataset.m));
+setTheme(document.documentElement.dataset.theme); mark("views", "v", view); mark("modes", "m", mode);
+
+let timer;
+["q", "from", "to"].forEach(id => $(id).addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(refresh, 200); }));
+$("more").onclick = () => loadFeed(false);
+renderComposer(); setupNotify(); refresh();
+checkReminders(); setInterval(checkReminders, 30000);
+</script>
+</body>
+</html>
