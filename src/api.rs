@@ -26,8 +26,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notes/:id", put(update).delete(remove))
         .route("/api/tags", get(tags))
         .route("/api/export", get(export))
-        .route("/api/notes/:id/toggle", post(toggle))
-        .route("/api/cards/todos", get(todos))
         .route("/api/suggest", post(suggest))
         .route("/api/rules", get(rules).post(add_rule))
         .route("/api/rules/apply", post(apply_rules))
@@ -120,25 +118,6 @@ async fn tags(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoRespon
     let o = owner(&s, &h).await?;
     let st = s.store.clone();
     Ok(Json(blocking(move || st.tags(&o)).await?))
-}
-
-#[derive(Deserialize)]
-struct ToggleInput {
-    line: usize,
-}
-
-async fn toggle(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Json(b): Json<ToggleInput>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
-    let st = s.store.clone();
-    Ok(Json(blocking(move || st.toggle_item(&o, id, b.line)).await?))
-}
-
-/// A virtual card: every open checklist item across all notes, in the same card vocabulary as notes.
-async fn todos(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
-    let st = s.store.clone();
-    let items = blocking(move || st.todos(&o)).await?;
-    Ok(Json(serde_json::json!({ "kind": "todos", "title": "Todos", "count": items.len(), "items": items })))
 }
 
 #[derive(Deserialize)]

@@ -10,13 +10,14 @@ Env: `CHUCK_DB` (db path), `CHUCK_ADDR` (bind address, default loopback), `CHUCK
 
 ## Cards
 
-Everything on the feed or board is a card with a `kind`: `note`, `list` (a note with `- [ ]` items, with progress), `reminder`, and the virtual `todos` card that gathers every open item from every list. Feed and board only lay cards out. Add a card type by registering a renderer in `CARD_RENDERERS` in `static/index.html`.
+Everything is a card with a `kind`: `note`, `todo` (a card with `- [ ]` items, shown with progress) or `reminder`.
 
-- **Todos card:** open items grouped by source note; ticking one updates the source note.
+- **Types:** pick Note, Todo or Reminder, or type `#todo`, `#reminder` or `#note` followed by a space while writing. The composer switches type, removes the token and keeps your text. (These three words are reserved for this and are not used as tags.)
+- **Todos:** open todo cards stay at the top, soonest due date first, until every item is ticked. A todo card can have a due date; overdue and due-today cards are highlighted.
+- **Feed and Board:** the Feed is one column; the Board is a grid. Both show cards in creation order (open todos first) with each card's tags shown on it. There are no tag columns: pick a tag in the sidebar to see just those cards.
 - **Tag suggestions:** while you type, Chuck suggests tags you already use, from keyword co-occurrence in your own notes. Local only, no external calls.
 - **Auto-tag rules:** "if a note contains `jira` or `PR-`, add `#work`". Applied on save, and to existing notes on demand. See the sidebar panel.
-
-- **Export:** the **Export .md** button downloads one Markdown file, oldest first, with tags and reminders as metadata. It follows the active tag, search and date filters. API: `GET /api/export` (same filter parameters as `/api/notes`; paging is ignored).
+- **Export:** the **Export .md** button downloads one Markdown file, oldest first, with tags, due dates and reminders as metadata. It follows the active tag, search and date filters. API: `GET /api/export` (same filter parameters as `/api/notes`; paging is ignored).
 
 ## Extension points
 
