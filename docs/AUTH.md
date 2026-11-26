@@ -74,22 +74,59 @@ Lock the task security group to the ALB so requests cannot skip it.
     CHUCK_JWT_ISSUER=https://cognito-idp.<region>.amazonaws.com/<pool-id>
     CHUCK_JWT_AUDIENCE=<app client id>
 
-## Using it with Midway, CloudFront or another corporate SSO
+## Plugging in your own provider (Midway, a CDN signer, anything else)
 
-I could not see Amazon-internal documentation, so this maps the two shapes such systems usually take onto the providers above.
-Check which one your setup uses:
+You do not need to change or fork Chuck. Chuck is also a library: write a small binary in your own repo that registers
+your provider and starts the server. The provider is then selected with `CHUCK_AUTH=<name>`, alone or in a list
+(`CHUCK_AUTH=<name>,token`).
 
-1. **The SSO layer in front of Chuck forwards a signed JWT** (an OIDC token in some header): use `jwt`. You need the
-   header name, the issuer, the key/JWKS URL, and the claim that holds the login name.
-2. **The SSO layer authenticates and passes only a plain identity header** (the usual pattern for a CloudFront + edge
-   function or reverse-proxy setup): use `header`, and have that layer also add the shared secret header.
+    # Cargo.toml of your own repo
+    [dependencies]
+    chuck = { git = "https://github.com/andrewcdowning/chuck" }
+    axum = "0.7"
+    tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
-Either way, only configuration changes; Chuck's storage and API stay the same. If neither fits, add a provider (below).
+    // src/main.rs
+    use axum::http::HeaderMap;
+    use chuck::auth::{sanitize_owner, Authenticator};
+    use std::sync::Arc;
 
-## Adding a provider
+    struct MySso;
+    impl Authenticator for MySso {
+        fn authenticate(&self, headers: &HeaderMap) -> Option<String> {
+            // Verify/decode what your SSO layer sends. Return the user id, or None for 401.
+            sanitize_owner(headers.get("x-your-header")?.to_str().ok()?)
+        }
+    }
 
-1. Create `src/auth/<name>.rs` with a type implementing `Authenticator`: read the headers, return `Some(owner)` or `None`.
-   Run owner ids through `sanitize_owner`. It may block briefly, because the API calls it on a blocking thread.
-2. Add a branch in `from_env` in `src/auth/mod.rs` for the new `CHUCK_AUTH` name and read its settings from environment
-   variables, returning a clear `Err(String)` for bad configuration (startup fails fast).
-3. Add unit tests next to it. See `jwt.rs` for a pattern that signs tokens with a throwaway test key.
+    #[tokio::main]
+    async fn main() {
+        let opts = chuck::Options::from_env()
+            .with_provider("mysso", || Ok(Arc::new(MySso) as Arc<dyn Authenticator>));
+        if let Err(e) = chuck::run(opts).await {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+
+Run it with `CHUCK_AUTH=mysso`. A complete runnable version is `examples/custom_auth.rs`
+(`CHUCK_AUTH=corp CHUCK_CORP_USER_HEADER=x-forwarded-user cargo run --example custom_auth`).
+
+What you get from Chuck: the owner id you return scopes every note, the startup safety rail applies (a non-loopback
+listener with no real provider is refused), and your provider can be combined with the built-ins in `CHUCK_AUTH`.
+`sanitize_owner` and `ct_eq` (constant-time compare, for shared secrets) are exported for provider authors.
+
+The same seam exists for storage: `Options::with_store(Arc<dyn NoteStore>)` swaps SQLite for your own store.
+
+Rules for a provider:
+
+- `authenticate` may block briefly (the API calls it on a blocking thread), so fetching keys over the network is fine.
+  Cache what you fetch.
+- Treat every header as untrusted unless something upstream proves it came from your edge layer (a signature, or a shared
+  secret header as in the `header` provider). Never trust a bare user header on a port users can reach directly.
+- The builder closure runs at startup. Read your settings there and return `Err("...")` for bad configuration so it fails fast.
+
+## Adding a built-in provider to this repo
+
+Create `src/auth/<name>.rs`, implement `Authenticator`, and add a branch in `from_env` in `src/auth/mod.rs`. See `jwt.rs`
+for a pattern that tests with a throwaway signing key.
