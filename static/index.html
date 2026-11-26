@@ -102,6 +102,8 @@
   .todos-card .head { background: var(--on-bg); color: var(--on-tx); }
   .todos-card .content { max-height: 52vh; overflow-y: auto; }
   .todos-card.compact .head { display: none; }
+  .note.compact .head { font-size: 10px; letter-spacing: .06em; flex-wrap: wrap; row-gap: 2px; }
+  .note .head > span:first-child { white-space: nowrap; flex: none; }
   .todo { display: flex; gap: 10px; align-items: center; padding: 2px 0; }
   .todo input.txt { flex: 1; width: auto; padding: 4px 6px; border: var(--bw) solid transparent; background: transparent; border-radius: 8px; font: inherit; }
   .todo input.txt:hover, .todo input.txt:focus { border-color: var(--edge); background: var(--field); }
