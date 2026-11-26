@@ -49,13 +49,30 @@ impl SqliteStore {
                  CREATE INDEX IF NOT EXISTS notes_remind ON notes(owner, remind_at);",
             )?;
         }
+        // Todo cards: a due date, and a maintained count of open items so they can be pinned above other cards.
+        let has: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('notes') WHERE name='open_todos'", [], |r| r.get(0))?;
+        if has == 0 {
+            conn.execute_batch(
+                "ALTER TABLE notes ADD COLUMN due_at INTEGER;
+                 ALTER TABLE notes ADD COLUMN open_todos INTEGER NOT NULL DEFAULT 0;",
+            )?;
+            let rows: Vec<(i64, String)> = {
+                let mut st = conn.prepare("SELECT id, body FROM notes WHERE body LIKE '%[ ]%'")?;
+                let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+                v
+            };
+            for (id, body) in rows {
+                conn.execute("UPDATE notes SET open_todos=?1 WHERE id=?2", params![open_items(&body), id])?;
+            }
+        }
         Ok(Self { conn: Mutex::new(conn) })
     }
 
     fn load(conn: &Connection, owner: &str, id: i64) -> Result<Note> {
         let mut note = conn
             .query_row(
-                "SELECT id, body, created_at, updated_at, remind_at, repeat, reminder_done FROM notes WHERE id=?1 AND owner=?2",
+                "SELECT id, body, created_at, updated_at, remind_at, repeat, reminder_done, due_at FROM notes WHERE id=?1 AND owner=?2",
                 params![id, owner],
                 |r| {
                     Ok(Note {
@@ -68,6 +85,7 @@ impl SqliteStore {
                         remind_at: r.get(4)?,
                         repeat: r.get(5)?,
                         reminder_done: r.get::<_, i64>(6)? != 0,
+                        due_at: r.get(7)?,
                     })
                 },
             )
@@ -125,9 +143,10 @@ impl NoteStore for SqliteStore {
         let t = now();
         let remind_at = input.remind_at.filter(|v| *v > 0);
         let repeat = input.repeat.clone().filter(|r| !r.is_empty());
+        let due_at = input.due_at.filter(|v| *v > 0);
         conn.execute(
-            "INSERT INTO notes(owner, body, created_at, updated_at, remind_at, repeat) VALUES(?1, ?2, ?3, ?3, ?4, ?5)",
-            params![owner, body, t, remind_at, repeat],
+            "INSERT INTO notes(owner, body, created_at, updated_at, remind_at, repeat, due_at, open_todos) VALUES(?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7)",
+            params![owner, body, t, remind_at, repeat, due_at, open_items(body)],
         )?;
         let id = conn.last_insert_rowid();
         conn.execute("INSERT INTO notes_fts(rowid, body) VALUES(?1, ?2)", params![id, body])?;
@@ -152,9 +171,14 @@ impl NoteStore for SqliteStore {
         let done = input
             .reminder_done
             .unwrap_or(if remind_at != cur.remind_at { false } else { cur.reminder_done });
+        let due_at = match input.due_at {
+            None => cur.due_at,
+            Some(v) if v <= 0 => None,
+            Some(v) => Some(v),
+        };
         conn.execute(
-            "UPDATE notes SET body=?1, updated_at=?2, remind_at=?3, repeat=?4, reminder_done=?5 WHERE id=?6 AND owner=?7",
-            params![body, now(), remind_at, repeat, done as i64, id, owner],
+            "UPDATE notes SET body=?1, updated_at=?2, remind_at=?3, repeat=?4, reminder_done=?5, due_at=?6, open_todos=?7 WHERE id=?8 AND owner=?9",
+            params![body, now(), remind_at, repeat, done as i64, due_at, open_items(body), id, owner],
         )?;
         conn.execute("UPDATE notes_fts SET body=?1 WHERE rowid=?2", params![body, id])?;
         Self::set_tags(&conn, owner, id, body)?;
@@ -194,7 +218,12 @@ impl NoteStore for SqliteStore {
         if q.reminders.unwrap_or(false) {
             sql.push_str(" AND n.remind_at IS NOT NULL AND n.reminder_done=0 ORDER BY n.remind_at ASC, n.id ASC LIMIT ? OFFSET ?");
         } else {
-            sql.push_str(" ORDER BY n.created_at DESC, n.id DESC LIMIT ? OFFSET ?");
+            // Todo cards with open items stay on top (soonest due first, undated last) until they are complete.
+            sql.push_str(
+                " ORDER BY (n.open_todos > 0) DESC,
+                  CASE WHEN n.open_todos > 0 THEN COALESCE(n.due_at, 9223372036854775807) END ASC,
+                  n.created_at DESC, n.id DESC LIMIT ? OFFSET ?",
+            );
         }
         args.push((q.limit.unwrap_or(50).min(200) as i64).into());
         args.push((q.offset.unwrap_or(0) as i64).into());
@@ -209,37 +238,6 @@ impl NoteStore for SqliteStore {
     fn get(&self, owner: &str, id: i64) -> Result<Note> {
         let conn = self.conn.lock().unwrap();
         Self::load(&conn, owner, id)
-    }
-
-    fn todos(&self, owner: &str) -> Result<Vec<TodoItem>> {
-        const MAX_ITEMS: usize = 500;
-        let conn = self.conn.lock().unwrap();
-        let mut st = conn.prepare(
-            "SELECT id, body FROM notes WHERE owner=?1 AND body LIKE '%[ ]%' ORDER BY created_at DESC, id DESC LIMIT 300",
-        )?;
-        let notes: Vec<(i64, String)> = st
-            .query_map([owner], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<_, _>>()?;
-        let mut out = Vec::new();
-        for (id, body) in notes {
-            let source: String = body
-                .lines()
-                .find(|l| !l.trim().is_empty() && parse_item(l).is_none())
-                .unwrap_or("")
-                .chars()
-                .take(80)
-                .collect();
-            let tags = Self::load(&conn, owner, id)?.tags;
-            for (line, text) in body.split('\n').enumerate() {
-                if let Some((false, item)) = parse_item(text) {
-                    out.push(TodoItem { note_id: id, line, text: item.to_string(), source: source.clone(), tags: tags.clone() });
-                    if out.len() >= MAX_ITEMS {
-                        return Ok(out);
-                    }
-                }
-            }
-        }
-        Ok(out)
     }
 
     fn suggest_tags(&self, owner: &str, text: &str) -> Result<Vec<String>> {
@@ -415,23 +413,31 @@ mod tests {
     }
 
     #[test]
-    fn todos_toggle_and_kinds() {
+    fn todo_cards_pin_and_due() {
         let s = SqliteStore::open(":memory:").unwrap();
-        let inp = |b: &str| NoteInput { body: b.into(), ..Default::default() };
-        let a = s.create("me", &inp("Groceries #home\n- [ ] milk\n- [x] eggs\n- [ ] bread")).unwrap();
-        s.create("me", &inp("plain note")).unwrap();
-        s.create("other", &inp("- [ ] not mine")).unwrap();
-        assert_eq!(a.kind, "list");
-        let t = s.todos("me").unwrap();
-        assert_eq!(t.iter().map(|i| (i.line, i.text.as_str())).collect::<Vec<_>>(), vec![(1, "milk"), (3, "bread")]);
-        assert_eq!(t[0].source, "Groceries #home");
-        assert_eq!(t[0].tags, vec!["home"]);
+        let mk = |b: &str, due: Option<i64>| NoteInput { body: b.into(), due_at: due, ..Default::default() };
+        let plain_old = s.create("me", &mk("plain old", None)).unwrap();
+        let todo_nodue = s.create("me", &mk("Chores\n- [ ] sweep", None)).unwrap();
+        let todo_late = s.create("me", &mk("Later\n- [ ] x", Some(2_000))).unwrap();
+        let todo_soon = s.create("me", &mk("Soon\n- [ ] y", Some(1_000))).unwrap();
+        let plain_new = s.create("me", &mk("plain new", None)).unwrap();
+        assert_eq!(todo_soon.kind, "todo");
+        assert_eq!(todo_soon.due_at, Some(1_000));
 
-        let n = s.toggle_item("me", a.id, 1).unwrap();
-        assert!(n.body.contains("- [x] milk"));
-        assert_eq!(s.todos("me").unwrap().len(), 1);
-        assert!(matches!(s.toggle_item("other", a.id, 1), Err(StoreError::NotFound)));
-        assert!(matches!(s.toggle_item("me", a.id, 0), Err(StoreError::NotFound)));
+        let ids = |s: &SqliteStore| s.list("me", &NoteQuery::default()).unwrap().into_iter().map(|n| n.id).collect::<Vec<_>>();
+        // open todos first, soonest due first, undated after dated; then the rest newest first
+        assert_eq!(ids(&s), vec![todo_soon.id, todo_late.id, todo_nodue.id, plain_new.id, plain_old.id]);
+
+        // completing every item drops the card out of the pinned group
+        s.update("me", todo_soon.id, &mk("Soon\n- [x] y", None)).unwrap();
+        assert_eq!(ids(&s), vec![todo_late.id, todo_nodue.id, plain_new.id, todo_soon.id, plain_old.id]);
+        // due date is kept when absent from an update, and cleared with 0
+        assert_eq!(s.get("me", todo_soon.id).unwrap().due_at, Some(1_000));
+        let cleared = s.update("me", todo_soon.id, &mk("Soon\n- [x] y", Some(0))).unwrap();
+        assert!(cleared.due_at.is_none());
+        // reopening an item pins it again
+        s.update("me", todo_soon.id, &mk("Soon\n- [ ] y", None)).unwrap();
+        assert_eq!(ids(&s), vec![todo_late.id, todo_soon.id, todo_nodue.id, plain_new.id, plain_old.id]);
     }
 
     #[test]

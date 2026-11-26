@@ -98,14 +98,6 @@
   .toast .row { margin: 8px 0 0; }
   .toast button { border: 2px solid #111; border-radius: 999px; background: #fff; color: #111; font: 600 12px var(--ui); padding: 3px 12px; cursor: pointer; }
 
-  /* Todos: a virtual card that gathers open checklist items from every note */
-  .todos-card .head { background: var(--on-bg); color: var(--on-tx); }
-  .todos-card .content { max-height: 52vh; overflow-y: auto; }
-  .todos-card.compact .head { display: none; }
-  .note.compact .head { font-size: 10px; letter-spacing: .06em; flex-wrap: wrap; row-gap: 2px; }
-  .todogroup + .todogroup { margin-top: 12px; padding-top: 10px; border-top: var(--bw) dashed var(--edge); }
-  .todosrc { margin-bottom: 4px; text-transform: none; letter-spacing: .04em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
   /* Tag suggestions, auto tags, rules */
   .sugg { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 0; margin-top: 8px; }
   .sugg:empty { display: none; }
@@ -120,16 +112,15 @@
   details.rules input { margin: 6px 0 0; padding: 6px 10px; font-size: 13px; }
   details.rules .row { margin: 8px 0 0; }
 
-  /* Board: one column per tag, scrolls sideways, snaps to columns */
-  .boardwrap { position: relative; }
-  .strip { display: flex; gap: 14px; overflow-x: auto; scroll-snap-type: x proximity; overscroll-behavior-x: contain; padding-bottom: 12px; align-items: flex-start; scrollbar-width: thin; }
-  .col { flex: 0 0 290px; scroll-snap-align: start; scroll-snap-stop: always; display: flex; flex-direction: column; max-height: 72vh; }
-  .colhead { background: var(--accent, var(--on-bg)); color: var(--accent-ink, var(--on-tx)); border: var(--bw) solid var(--edge); border-radius: 12px; padding: 7px 12px; display: flex; justify-content: space-between;
-             font: 600 12px var(--mono); text-transform: uppercase; letter-spacing: .12em; flex: none; }
-  .collist { overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
-  .collist .note:first-child { margin-top: 10px; }
-  .arrows { display: flex; gap: 6px; }
-  .arrows button { width: 30px; height: 30px; border-radius: 8px; border: var(--bw) solid var(--edge); background: var(--field); color: var(--tx); cursor: pointer; font-size: 16px; }
+  /* Board: a grid of cards in creation order (open todos first). No columns. */
+  /* Tags written in the text stay as plain text; the tag row at the bottom of the card is the single tag display. */
+  .body .tag { background: none; color: inherit; padding: 0; font-weight: inherit; text-decoration: underline dotted; text-underline-offset: 3px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; align-items: start; }
+  .grid .note { margin: 0; }
+  .grid .empty { grid-column: 1 / -1; }
+  .note.compact .head { font-size: 10px; letter-spacing: .06em; flex-wrap: wrap; row-gap: 2px; }
+  .note .head > span:first-child { white-space: nowrap; flex: none; }
+  .row .label { margin-right: 2px; }
 </style>
 </head>
 <body>
@@ -159,7 +150,7 @@
     </div>
 
     <div class="seg" id="modes" role="group" aria-label="Capture type" style="margin-bottom:8px">
-      <button data-m="note">Note</button><button data-m="list">List</button><button data-m="reminder">Reminder</button>
+      <button data-m="note">Note</button><button data-m="todo">Todo</button><button data-m="reminder">Reminder</button>
     </div>
     <div id="composer"></div>
 
@@ -174,7 +165,7 @@
 <div class="toasts" id="toasts"></div>
 <script>
 const $ = id => document.getElementById(id);
-const PAGE = 50, BOARD_MAX = 200;
+const PAGE = 50;
 let filter = "";            // "" | tag name | "@reminders"
 let view = new URLSearchParams(location.search).get("view") || localStorage.getItem("chuck-view") || "feed";
 let mode = "note";
@@ -197,6 +188,12 @@ const put = (n, patch) => api("/api/notes/" + n.id, { method: "PUT", body: JSON.
 const pad = x => String(x).padStart(2, "0");
 const toLocalInput = sec => { const d = new Date(sec * 1000); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const fromLocalInput = v => v ? Math.floor(new Date(v).getTime() / 1000) : 0;
+const toDateInput = sec => toLocalInput(sec).slice(0, 10);
+const fromDateInput = v => v ? Math.floor(new Date(v + "T23:59:59").getTime() / 1000) : 0; // due at the end of that local day
+const fmtDue = sec => {
+  const d = new Date(sec * 1000);
+  return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric", ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }) });
+};
 const fmtWhen = sec => new Date(sec * 1000).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
 /* ---------- checklist parsing ---------- */
@@ -276,32 +273,86 @@ function whenFields(note) {
   return { node, value: () => ({ remind_at: fromLocalInput(when.value), repeat: rep.value }), has: () => !!when.value, setFrom: p => { when.value = toLocalInput(p.at); rep.value = p.repeat; } };
 }
 
-/* ---------- composer ---------- */
-function renderComposer() {
-  const box = $("composer");
-  const ta = el("textarea", { placeholder: "Capture something. Use #tags. Ctrl/Cmd+Enter to save." });
-  const msg = el("div", { className: "err" });
-  let extra = null, items = null, title = null, kids = [];
-  if (mode === "list") {
-    title = el("input", { placeholder: "List title, e.g. Groceries #home" });
-    items = el("textarea", { placeholder: "One item per line" });
-    kids = [title, el("div", { style: "height:8px" }), items];
-  } else if (mode === "reminder") {
-    ta.placeholder = "e.g. remind me at 3pm to call Bob, or every Monday at 8am standup. Or pick a time below.";
-    extra = whenFields();
-    kids = [ta, extra.node, el("div", { className: "hint", textContent: "Reminders alert while Chuck is open in a browser tab." })];
-  } else kids = [ta];
+/* ---------- due date field (todo cards) ---------- */
+function dueFields(note) {
+  const d = el("input", { type: "date", title: "Due date" });
+  if (note && note.due_at) d.value = toDateInput(note.due_at);
+  const set = days => { const x = new Date(); x.setDate(x.getDate() + days); d.value = `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`; };
+  const q = (label, fn) => el("button", { className: "btn sm", type: "button", textContent: label, onclick: fn });
+  const node = el("div", { className: "row" }, el("span", { className: "label", textContent: "Due" }), d,
+    q("Today", () => set(0)), q("Tomorrow", () => set(1)), q("Next week", () => set(7)), q("Clear", () => { d.value = ""; }));
+  return { node, value: () => fromDateInput(d.value) };
+}
 
+/* ---------- composer ----------
+   Card types: note, todo, reminder. Pick one with the buttons, or type #todo / #reminder / #note followed by a
+   space and the composer switches to that type (the token is removed and your text is kept). */
+const TYPE_TOKEN = /(^|\s)#(todo|reminder|note)(?=\s)/i;
+const TYPE_TOKEN_END = /(^|\s)#(todo|reminder|note)\s*$/i;
+let composerText = () => "";   // merged text of the active composer, carried across a type switch
+
+function stripToken(text, re) {
+  const m = re.exec(text);
+  if (!m) return null;
+  const rest = (text.slice(0, m.index) + m[1] + text.slice(m.index + m[0].length))
+    .replace(/[ \t]{2,}/g, " ").replace(/[ \t]+$/gm, "").replace(/^\s+/, "");
+  return { type: m[2].toLowerCase(), text: rest };
+}
+
+function switchType(type, text) {
+  mode = type;
+  mark("modes", "m", type);
+  if (type === "todo") {
+    // One line becomes the first item; several lines make the first one the title.
+    const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+    renderComposer(lines.length > 1 ? { title: lines[0], items: lines.slice(1).join("\n") } : { items: lines[0] || "" });
+  } else renderComposer({ text });
+  const f = $("composer").querySelector("textarea");
+  if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); }
+}
+
+function renderComposer(carry = {}) {
+  const box = $("composer");
+  const msg = el("div", { className: "err" });
   const sugg = el("div", { className: "sugg" });
-  attachSuggest(mode === "list" ? [title, items] : [ta], mode === "list" ? title : ta, sugg);
+  let ta, title, items, extra, due, fields, kids;
+  if (mode === "todo") {
+    title = el("input", { placeholder: "Title (optional), e.g. Groceries #home", value: carry.title || "" });
+    items = el("textarea", { placeholder: "One item per line", value: carry.items || "" });
+    due = dueFields();
+    fields = [title, items];
+    kids = [title, el("div", { style: "height:8px" }), items, due.node];
+    composerText = () => [title.value, items.value].filter(v => v.trim()).join("\n");
+  } else {
+    ta = el("textarea", { value: carry.text || "", placeholder: mode === "reminder"
+      ? "e.g. remind me at 3pm to call Bob, or every Monday at 8am standup. Or pick a time below."
+      : "Capture something. Use #tags. Type #todo or #reminder to change the card type. Ctrl/Cmd+Enter to save." });
+    fields = [ta];
+    kids = [ta];
+    if (mode === "reminder") {
+      extra = whenFields();
+      kids.push(extra.node, el("div", { className: "hint", textContent: "Reminders alert while Chuck is open in a browser tab." }));
+    }
+    composerText = () => ta.value;
+  }
+  attachSuggest(fields, fields[0], sugg);
+  fields.forEach(f => f.addEventListener("input", () => {
+    const r = stripToken(composerText(), TYPE_TOKEN);
+    if (r) switchType(r.type, r.text);
+  }));
 
   const save = async () => {
     msg.textContent = "";
+    // A type token left at the very end (no space typed after it) switches the type instead of saving.
+    const r = stripToken(composerText(), TYPE_TOKEN_END);
+    if (r) { switchType(r.type, r.text); return; }
     let body, patch = {};
-    if (mode === "list") {
-      const lines = items.value.split("\n").map(s => s.trim()).filter(Boolean);
+    if (mode === "todo") {
+      const lines = items.value.split("\n").map(l => l.trim()).filter(Boolean);
       if (!lines.length) { msg.textContent = "Add at least one item."; return; }
       body = [title.value.trim(), ...lines.map(l => "- [ ] " + l.replace(/^[-*]\s*(\[[ xX]\]\s*)?/, ""))].filter(Boolean).join("\n");
+      const d = due.value();
+      if (d) patch.due_at = d;
     } else {
       body = ta.value.trim();
       if (!body) return;
@@ -313,20 +364,20 @@ function renderComposer() {
         if (!p) { msg.textContent = "Couldn't read a time. Pick one below."; return; }
         v = { remind_at: p.at, repeat: p.repeat };
       }
-      patch = v;
+      patch = { ...patch, ...v };
     }
     try { await api("/api/notes", { method: "POST", body: JSON.stringify({ body, ...patch }) }); }
     catch (e) { msg.textContent = e.message; return; }
     renderComposer(); refresh();
   };
-  ta.addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) save(); });
+  fields.forEach(f => f.addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) save(); }));
   box.replaceChildren(...kids, sugg, el("div", { className: "row" }, el("button", { className: "btn primary", textContent: "Save", onclick: save }), msg));
 }
 
 /* ---------- cards ----------
-   Everything on the feed or board is a card with a `kind`. Notes, lists and reminders share one renderer
-   (`noteEl`); virtual cards such as `todos` register their own. Layouts only place cards. */
-const CARD_RENDERERS = { todos: todosCardEl };
+   Everything on the feed or board is a card with a `kind`. Notes, todos and reminders share one renderer
+   (`noteEl`); a new card type can register its own renderer here. Layouts only place cards. */
+const CARD_RENDERERS = {};
 function cardEl(card, compact) { return (CARD_RENDERERS[card.kind] || noteEl)(card, compact); }
 
 /* ---------- note card ---------- */
@@ -356,7 +407,7 @@ function bodyEl(n, card) {
       onclick: async () => {
         const l = n.body.split("\n");
         l[i] = l[i].replace(/\[( |x|X)\]/, done ? "[ ]" : "[x]");
-        try { const up = await put({ ...n, body: l.join("\n") }, {}); card.replaceWith(noteEl(up, card.classList.contains("compact"))); refreshTodos(); }
+        try { const up = await put({ ...n, body: l.join("\n") }, {}); card.replaceWith(noteEl(up, card.classList.contains("compact"))); refresh(); }
         catch (e) { alert(e.message); }
       } });
     box.append(el("div", { className: "item" + (done ? " done" : "") }, cb, el("span", { className: "txt" }, renderText(m[4]))));
@@ -384,6 +435,15 @@ function completeReminder(n) {
   return n.repeat ? put(n, { remind_at: nextOccurrence(n.remind_at, n.repeat) }) : put(n, { reminder_done: true });
 }
 
+function dueChip(n, open) {
+  const now = Date.now(), sameDay = new Date(n.due_at * 1000).toDateString() === new Date().toDateString();
+  let cls = "rem-chip", label = "Due " + fmtDue(n.due_at);
+  if (!open) cls += " sent";
+  else if (n.due_at * 1000 < now) { cls += " due"; label = "Overdue " + fmtDue(n.due_at); }
+  else if (sameDay) { cls += " due"; label = "Due today"; }
+  return el("div", { className: cls, textContent: "📅 " + label });
+}
+
 function noteEl(n, compact) {
   const card = el("div", { className: "note" + (compact ? " compact" : "") });
   if (n.tags.length) paint(card, n.tags[0]); else card.classList.add("plain");
@@ -403,13 +463,13 @@ function noteEl(n, compact) {
   head.append(acts);
   const content = el("div", { className: "content" });
   if (n.remind_at) content.append(reminderChip(n, card));
+  if (n.due_at && stats) content.append(dueChip(n, stats.total - stats.done > 0));
   const body = bodyEl(n, card);
   content.append(body);
-  const inline = new Set([...n.body.matchAll(/(?:^|\s)#([\p{L}\p{N}_-]+)/gu)].map(m => m[1].toLowerCase()));
-  const extras = n.tags.filter(t => !inline.has(t));
-  if (extras.length) {
-    content.append(el("div", { className: "autotags" }, el("span", { className: "label", textContent: "Auto" }),
-      ...extras.map(t => { const c = el("span", { className: "tag", textContent: "#" + t, onclick: () => pick(t) }); paint(c, t); return c; })));
+  // Every tag is shown on the card (written in the text or added by a rule); click one to filter.
+  if (n.tags.length) {
+    content.append(el("div", { className: "autotags" },
+      ...n.tags.map(t => { const c = el("span", { className: "tag", textContent: "#" + t, title: "Show #" + t, onclick: () => pick(t) }); paint(c, t); return c; })));
   }
   if (compact && (n.body.length > 400 || n.body.split("\n").length > 10)) {
     body.classList.add("clamp");
@@ -421,7 +481,7 @@ function noteEl(n, compact) {
     const add = el("input", { className: "additem", placeholder: "Add item, press Enter" });
     add.addEventListener("keydown", async e => {
       if (e.key !== "Enter" || !add.value.trim()) return;
-      try { const up = await put({ ...n, body: n.body.replace(/\s+$/, "") + "\n- [ ] " + add.value.trim() }, {}); card.replaceWith(noteEl(up, compact)); }
+      try { const up = await put({ ...n, body: n.body.replace(/\s+$/, "") + "\n- [ ] " + add.value.trim() }, {}); card.replaceWith(noteEl(up, compact)); refresh(); }
       catch (err) { alert(err.message); }
     });
     content.append(add);
@@ -433,52 +493,24 @@ function noteEl(n, compact) {
 function edit(card, n, compact) {
   const ta = el("textarea", { value: n.body });
   const wf = whenFields(n);
+  const isTodo = n.kind === "todo";
+  const df = isTodo ? dueFields(n) : null;
   const msg = el("div", { className: "err" });
   const sugg = el("div", { className: "sugg" });
   attachSuggest([ta], ta, sugg);
   const save = el("button", { className: "btn primary", textContent: "Save", onclick: async () => {
     const v = wf.value();
-    try { await api("/api/notes/" + n.id, { method: "PUT", body: JSON.stringify({ body: ta.value, remind_at: v.remind_at || -1, repeat: v.repeat }) }); }
+    const patch = { body: ta.value, remind_at: v.remind_at || -1, repeat: v.repeat };
+    if (df) patch.due_at = df.value() || -1;
+    try { await api("/api/notes/" + n.id, { method: "PUT", body: JSON.stringify(patch) }); }
     catch (e) { msg.textContent = e.message; return; }
     refresh();
   } });
   card.replaceChildren(el("div", { className: "content" }, ta, sugg,
+    ...(df ? [df.node] : []),
     el("div", { className: "label", style: "margin-top:10px", textContent: "Reminder (leave blank for none)" }), wf.node,
     el("div", { className: "row" }, save, el("button", { className: "btn", textContent: "Cancel", onclick: () => refresh() }), msg)));
   ta.focus();
-}
-
-/* ---------- todos: a virtual card ---------- */
-function todosCardEl(card, compact) {
-  const f = filter && filter !== "@reminders" ? filter : "";
-  const items = card.items.filter(i => !f || i.tags.includes(f));
-  if (!items.length) return null;
-  const box = el("div", { className: "note todos-card" + (compact ? " compact" : "") });
-  const content = el("div", { className: "content" });
-  const groups = new Map();
-  items.forEach(i => { if (!groups.has(i.note_id)) groups.set(i.note_id, []); groups.get(i.note_id).push(i); });
-  groups.forEach(list => {
-    const g = el("div", { className: "todogroup" }, el("div", { className: "label todosrc", textContent: list[0].source || "Untitled", title: list[0].source }));
-    list.forEach(i => {
-      const cb = el("button", { className: "box", type: "button", title: "Mark done", "aria-pressed": "false",
-        onclick: async () => {
-          try { await api(`/api/notes/${i.note_id}/toggle`, { method: "POST", body: JSON.stringify({ line: i.line }) }); refresh(); }
-          catch (e) { alert(e.message); }
-        } });
-      g.append(el("div", { className: "item" }, cb, el("span", { className: "txt" }, renderText(i.text))));
-    });
-    content.append(g);
-  });
-  box.append(el("div", { className: "head" }, el("span", { textContent: "Todos" }), el("span", { textContent: items.length + " open" })), content);
-  return box;
-}
-async function refreshTodos() {
-  const olds = [...document.querySelectorAll(".todos-card")];
-  if (!olds.length) return;
-  try {
-    const card = await api("/api/cards/todos");
-    olds.forEach(o => { const n = todosCardEl(card, o.classList.contains("compact")); if (n) o.replaceWith(n); else o.remove(); });
-  } catch {}
 }
 
 /* ---------- tag suggestions (local heuristics on the server) ---------- */
@@ -543,53 +575,16 @@ function params(extra = {}) {
 }
 
 async function loadFeed(reset) {
+  const board = view === "board";
   if (reset) { offset = 0; $("out").replaceChildren(); }
+  $("out").className = board ? "grid" : "";
   const extra = { limit: PAGE, offset };
   if (filter === "@reminders") extra.reminders = "true"; else if (filter) extra.tag = filter;
   const notes = await api("/api/notes?" + params(extra));
-  if (reset && !$("q").value.trim() && filter !== "@reminders") {
-    const t = cardEl(await api("/api/cards/todos"), false);
-    if (t) $("out").append(t);
-  }
-  notes.forEach(n => $("out").append(cardEl(n, false)));
+  notes.forEach(n => $("out").append(cardEl(n, board)));
   offset += notes.length;
   if (reset && !notes.length) $("out").append(el("div", { className: "empty", textContent: filter === "@reminders" ? "No pending reminders" : "Nothing here yet" }));
   $("more").hidden = notes.length < PAGE;
-}
-
-async function loadBoard() {
-  $("more").hidden = true;
-  const [notes, tags, todos] = await Promise.all([api("/api/notes?" + params({ limit: BOARD_MAX })), api("/api/tags"), api("/api/cards/todos")]);
-  const cols = tags.map(t => ({ key: t.tag, title: "#" + t.tag, notes: notes.filter(n => n.tags.includes(t.tag)) }));
-  const untagged = notes.filter(n => !n.tags.length);
-  if (untagged.length) cols.push({ key: "", title: "Untagged", notes: untagged });
-  const strip = el("div", { className: "strip", tabIndex: 0 });
-  const todoCard = $("q").value.trim() ? null : todosCardEl(todos, true);
-  if (todoCard) {
-    const head = el("div", { className: "colhead" }, el("span", { textContent: "Todos" }), el("span", { textContent: todos.count }));
-    const col = el("section", { className: "col" }, head, el("div", { className: "collist" }, todoCard));
-    col.dataset.tag = "@todos";
-    strip.append(col);
-  }
-  cols.filter(c => c.notes.length).forEach(c => {
-    const head = el("div", { className: "colhead" }, el("span", { textContent: c.title }), el("span", { textContent: c.notes.length }));
-    if (c.key) paint(head, c.key);
-    const list = el("div", { className: "collist" });
-    c.notes.forEach(n => list.append(cardEl(n, true)));
-    const col = el("section", { className: "col" }, head, list);
-    col.dataset.tag = c.key;
-    strip.append(col);
-  });
-  const arrows = el("div", { className: "arrows" },
-    el("button", { textContent: "‹", title: "Scroll left", onclick: () => strip.scrollBy({ left: -310, behavior: "smooth" }) }),
-    el("button", { textContent: "›", title: "Scroll right", onclick: () => strip.scrollBy({ left: 310, behavior: "smooth" }) }));
-  $("out").replaceChildren(el("div", { className: "boardwrap" },
-    el("div", { className: "bar" }, el("span", { className: "label", textContent: notes.length >= BOARD_MAX ? "Showing the newest " + BOARD_MAX + " notes" : "Board" }), arrows),
-    strip.children.length ? strip : el("div", { className: "empty", textContent: "Nothing here yet" })));
-  if (filter && filter !== "@reminders") {
-    const col = [...document.querySelectorAll(".col")].find(c => c.dataset.tag === filter);
-    if (col) col.scrollIntoView({ inline: "start", block: "nearest" });
-  }
 }
 
 async function loadFilters() {
@@ -617,7 +612,7 @@ function syncExport() {
 async function refresh() {
   syncExport();
   try {
-    await (view === "board" ? loadBoard() : loadFeed(true));
+    await loadFeed(true);
     await loadFilters();
   } catch (e) { $("out").replaceChildren(el("div", { className: "err", textContent: e.message })); }
 }
@@ -654,7 +649,7 @@ function setupNotify() {
 function mark(groupId, attr, val) { document.querySelectorAll(`#${groupId} button`).forEach(b => b.classList.toggle("on", b.dataset[attr] === val)); }
 function setTheme(t) { document.documentElement.dataset.theme = t; localStorage.setItem("chuck-theme", t); mark("themes", "t", t); }
 function setView(v) { view = v; localStorage.setItem("chuck-view", v); mark("views", "v", v); refresh(); }
-function setMode(m) { mode = m; mark("modes", "m", m); renderComposer(); }
+function setMode(m) { switchType(m, composerText()); }
 document.querySelectorAll("#themes button").forEach(b => b.onclick = () => setTheme(b.dataset.t));
 document.querySelectorAll("#views button").forEach(b => b.onclick = () => setView(b.dataset.v));
 document.querySelectorAll("#modes button").forEach(b => b.onclick = () => setMode(b.dataset.m));

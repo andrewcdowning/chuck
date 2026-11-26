@@ -50,6 +50,9 @@ pub fn to_markdown(notes: &[Note], now_secs: i64) -> String {
             }
             meta.push(r);
         }
+        if let Some(due) = n.due_at {
+            meta.push(format!("Due: {}", fmt_date(due)));
+        }
         if !meta.is_empty() {
             out.push_str(&meta.iter().map(|m| format!("*{m}*")).collect::<Vec<_>>().join("  \n"));
             out.push_str("\n\n");
@@ -75,6 +78,7 @@ mod tests {
             remind_at: None,
             repeat: None,
             reminder_done: false,
+            due_at: None,
         }
     }
 
@@ -93,12 +97,14 @@ mod tests {
         let mut b = note(1, "Standup", 1_000_000_000);
         b.remind_at = Some(4_102_444_800);
         b.repeat = Some("weekdays".into());
+        b.due_at = Some(1_800_000_000);
         let md = to_markdown(&[a, b], 1_795_732_903);
         assert!(md.starts_with("# Chuck export\n\nExported 2026-11-26 22:41 UTC · 2 notes\n"));
         // oldest first
         assert!(md.find("Standup").unwrap() < md.find("Groceries").unwrap());
         assert!(md.contains("*Tags: #home*"));
         assert!(md.contains("*Reminder: 2100-01-01 00:00 UTC (repeats weekdays)*"));
+        assert!(md.contains("*Due: 2027-01-15*"));
         assert!(md.contains("- [ ] milk\n- [x] eggs\n"));
         assert!(!md.contains("eggs\n\n\n"));
     }
