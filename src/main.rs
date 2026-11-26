@@ -13,13 +13,27 @@ async fn main() {
     let addr = std::env::var("CHUCK_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".into());
 
     let store = sqlite::SqliteStore::open(&db).expect("open database");
-    let auth: Arc<dyn auth::Authenticator> = match std::env::var("CHUCK_TOKEN") {
-        Ok(t) if !t.is_empty() => Arc::new(auth::StaticToken(t)),
-        _ => Arc::new(auth::LocalUser),
+    let cfg = match auth::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("auth config error: {e}");
+            std::process::exit(2);
+        }
     };
 
-    let app = api::router(api::AppState { store: Arc::new(store), auth });
+    // Refuse to serve unauthenticated on a non-loopback address unless the operator says so explicitly.
+    let loopback = addr.parse::<std::net::SocketAddr>().map(|a| a.ip().is_loopback()).unwrap_or(false);
+    if cfg.is_local_only && !loopback {
+        if std::env::var("CHUCK_ALLOW_INSECURE").as_deref() == Ok("1") {
+            eprintln!("WARNING: serving without authentication on {addr} (CHUCK_ALLOW_INSECURE=1)");
+        } else {
+            eprintln!("refusing to listen on {addr} without authentication: set CHUCK_AUTH (token, header, jwt) or CHUCK_ALLOW_INSECURE=1");
+            std::process::exit(2);
+        }
+    }
+
+    let app = api::router(api::AppState { store: Arc::new(store), auth: cfg.auth });
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
-    println!("chuck listening on http://{addr} (db: {db})");
+    println!("chuck listening on http://{addr} (db: {db}, auth: {})", cfg.names.join(","));
     axum::serve(listener, app).await.unwrap();
 }

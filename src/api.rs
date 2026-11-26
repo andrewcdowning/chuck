@@ -47,8 +47,14 @@ impl From<StoreError> for ApiError {
     }
 }
 
-fn owner(s: &AppState, h: &HeaderMap) -> Result<String, ApiError> {
-    s.auth.authenticate(h).ok_or(ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()))
+/// Authentication may fetch signing keys over the network, so it runs on a blocking thread.
+async fn owner(s: &AppState, h: &HeaderMap) -> Result<String, ApiError> {
+    let (auth, headers) = (s.auth.clone(), h.clone());
+    tokio::task::spawn_blocking(move || auth.authenticate(&headers))
+        .await
+        .ok()
+        .flatten()
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()))
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> crate::store::Result<T> + Send + 'static) -> Result<T, ApiError> {
@@ -75,7 +81,7 @@ fn validate(mut i: NoteInput) -> Result<NoteInput, ApiError> {
 }
 
 async fn create(State(s): State<AppState>, h: HeaderMap, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h)?;
+    let o = owner(&s, &h).await?;
     let input = validate(b)?;
     let st = s.store.clone();
     let n = blocking(move || st.create(&o, &input)).await?;
@@ -83,27 +89,27 @@ async fn create(State(s): State<AppState>, h: HeaderMap, Json(b): Json<NoteInput
 }
 
 async fn update(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h)?;
+    let o = owner(&s, &h).await?;
     let input = validate(b)?;
     let st = s.store.clone();
     Ok(Json(blocking(move || st.update(&o, id, &input)).await?))
 }
 
 async fn remove(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h)?;
+    let o = owner(&s, &h).await?;
     let st = s.store.clone();
     blocking(move || st.delete(&o, id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list(State(s): State<AppState>, h: HeaderMap, Query(q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h)?;
+    let o = owner(&s, &h).await?;
     let st = s.store.clone();
     Ok(Json(blocking(move || st.list(&o, &q)).await?))
 }
 
 async fn tags(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h)?;
+    let o = owner(&s, &h).await?;
     let st = s.store.clone();
     Ok(Json(blocking(move || st.tags(&o)).await?))
 }
