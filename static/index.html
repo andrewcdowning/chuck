@@ -68,7 +68,20 @@
                 font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .14em; border-bottom: var(--bw) solid var(--edge); }
   .note.plain .head { background: transparent; color: var(--mu); }
   .note .content { padding: 12px 14px; }
-  .note .body { white-space: pre-wrap; word-break: break-word; }
+  .note .body { word-break: break-word; }
+  /* Markdown */
+  .md-p { white-space: pre-wrap; margin: 0 0 6px; }
+  .note .body > :last-child { margin-bottom: 0; }
+  .note .body h1, .note .body h2, .note .body h3, .note .body h4, .note .body h5, .note .body h6 { margin: 8px 0 4px; line-height: 1.25; letter-spacing: -.02em; }
+  .note .body h1 { font-size: 1.35em; } .note .body h2 { font-size: 1.2em; } .note .body h3 { font-size: 1.08em; }
+  .note .body h4, .note .body h5, .note .body h6 { font-size: 1em; }
+  .note .body ul, .note .body ol { margin: 4px 0 6px; padding-left: 22px; }
+  .note .body blockquote { margin: 6px 0; padding: 2px 0 2px 12px; border-left: 3px solid var(--edge); color: var(--mu); white-space: pre-wrap; }
+  .note .body hr { border: 0; border-top: var(--bw) solid var(--edge); margin: 10px 0; }
+  .note .body code { font: 500 .88em var(--mono); background: var(--field); border: var(--bw) solid var(--edge); border-radius: 6px; padding: 0 4px; }
+  .note .body pre { margin: 6px 0; padding: 8px 10px; background: var(--field); border: var(--bw) solid var(--edge); border-radius: 10px; overflow-x: auto; }
+  .note .body pre code { border: 0; padding: 0; background: none; white-space: pre; }
+  .note .body a, .txt a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
   .note .body.clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 10; overflow: hidden; }
   .note .acts { display: flex; gap: 4px; }
   .note .acts button, .linkbtn { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; text-transform: inherit; letter-spacing: inherit; padding: 2px 6px; border-radius: 6px; opacity: .75; }
@@ -381,15 +394,92 @@ const CARD_RENDERERS = {};
 function cardEl(card, compact) { return (CARD_RENDERERS[card.kind] || noteEl)(card, compact); }
 
 /* ---------- note card ---------- */
-function renderText(text) {
+/* ---------- Markdown ----------
+   Rendered as DOM nodes with textContent only, never innerHTML, so note text cannot inject markup or scripts.
+   Raw HTML in a note is shown as plain text. Links must be http, https or mailto. Images are not rendered. */
+const INLINE = new RegExp([
+  "`([^`\\n]+)`",                                            // 1 inline code
+  "\\[([^\\]\\n]+)\\]\\(([^)\\s]+)\\)",                      // 2,3 [text](url)
+  "\\*\\*(?!\\s)([^\\n]+?)(?<!\\s)\\*\\*",                   // 4 bold
+  "~~(?!\\s)([^\\n]+?)(?<!\\s)~~",                           // 5 strikethrough
+  "(?<![\\w*])\\*(?![\\s*])([^*\\n]+?)(?<!\\s)\\*(?![\\w*])", // 6 italic *x*
+  "(?<!\\w)_(?!\\s)([^_\\n]+?)(?<!\\s)_(?!\\w)",             // 7 italic _x_
+  "(https?:\\/\\/[^\\s<>()]*[^\\s<>().,;:!?'\"])",           // 8 bare URL
+  "(?<=^|\\s)#([\\p{L}\\p{N}_-]+)",                          // 9 #tag
+].join("|"), "gu");
+const SAFE_URL = /^(https?:|mailto:)/i;
+
+function mdLink(href, content) {
+  const a = el("a", { href, target: "_blank", rel: "noopener noreferrer nofollow" });
+  a.append(content);
+  return a;
+}
+
+function renderInline(text, inLink = false) {
   const frag = document.createDocumentFragment();
-  text.split(/(#[\p{L}\p{N}_-]+)/gu).forEach(part => {
-    if (/^#[\p{L}\p{N}_-]+$/u.test(part)) {
-      const t = part.slice(1).toLowerCase();
-      const s = el("span", { className: "tag", textContent: part, onclick: () => pick(t) });
-      paint(s, t); frag.append(s);
-    } else frag.append(part);
-  });
+  let last = 0;
+  for (const m of text.matchAll(INLINE)) {
+    if (m.index > last) frag.append(text.slice(last, m.index));
+    last = m.index + m[0].length;
+    if (m[1] !== undefined) frag.append(el("code", { textContent: m[1] }));
+    else if (m[2] !== undefined) {
+      if (SAFE_URL.test(m[3]) && !inLink) frag.append(mdLink(m[3], renderInline(m[2], true)));
+      else frag.append(m[0]);
+    } else if (m[4] !== undefined) frag.append(el("strong", {}, renderInline(m[4], inLink)));
+    else if (m[5] !== undefined) frag.append(el("s", {}, renderInline(m[5], inLink)));
+    else if (m[6] !== undefined) frag.append(el("em", {}, renderInline(m[6], inLink)));
+    else if (m[7] !== undefined) frag.append(el("em", {}, renderInline(m[7], inLink)));
+    else if (m[8] !== undefined) frag.append(inLink ? m[8] : mdLink(m[8], m[8]));
+    else if (m[9] !== undefined) {
+      if (inLink) { frag.append(m[0]); continue; }
+      const t = m[9].toLowerCase();
+      const chip = el("span", { className: "tag", textContent: "#" + m[9], onclick: () => pick(t) });
+      paint(chip, t);
+      frag.append(chip);
+    }
+  }
+  if (last < text.length) frag.append(text.slice(last));
+  return frag;
+}
+
+const MD_HR = /^\s*([-*_])(\s*\1){2,}\s*$/;
+const MD_UL = /^\s*[-*+]\s+/;
+const MD_OL = /^\s*\d+[.)]\s+/;
+const MD_BLOCK = line => /^```/.test(line) || /^#{1,6}\s/.test(line) || /^>/.test(line) || MD_HR.test(line) || MD_UL.test(line) || MD_OL.test(line);
+
+function renderMarkdown(text) {
+  const frag = document.createDocumentFragment();
+  const lines = text.split("\n");
+  let i = 0, m;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    if (/^```/.test(line)) {
+      const buf = [];
+      for (i++; i < lines.length && !/^```/.test(lines[i]); i++) buf.push(lines[i]);
+      i++; // closing fence
+      frag.append(el("pre", {}, el("code", { textContent: buf.join("\n") })));
+    } else if ((m = /^(#{1,6})\s+(.*)$/.exec(line))) {
+      frag.append(el("h" + m[1].length, {}, renderInline(m[2])));
+      i++;
+    } else if (MD_HR.test(line)) {
+      frag.append(el("hr"));
+      i++;
+    } else if (/^>/.test(line)) {
+      const buf = [];
+      for (; i < lines.length && /^>/.test(lines[i]); i++) buf.push(lines[i].replace(/^>\s?/, ""));
+      frag.append(el("blockquote", {}, renderInline(buf.join("\n"))));
+    } else if (MD_UL.test(line) || MD_OL.test(line)) {
+      const ordered = MD_OL.test(line), re = ordered ? MD_OL : MD_UL;
+      const list = el(ordered ? "ol" : "ul");
+      for (; i < lines.length && re.test(lines[i]); i++) list.append(el("li", {}, renderInline(lines[i].replace(re, ""))));
+      frag.append(list);
+    } else {
+      const buf = [line];
+      for (i++; i < lines.length && lines[i].trim() && !MD_BLOCK(lines[i]); i++) buf.push(lines[i]);
+      frag.append(el("div", { className: "md-p" }, renderInline(buf.join("\n"))));
+    }
+  }
   return frag;
 }
 
@@ -397,7 +487,7 @@ function bodyEl(n, card) {
   const box = el("div", { className: "body" });
   const lines = n.body.split("\n");
   let pending = [];
-  const flush = () => { if (pending.length) { box.append(el("div", { className: "txtblock" }, renderText(pending.join("\n")))); pending = []; } };
+  const flush = () => { if (pending.length) { box.append(el("div", { className: "txtblock" }, renderMarkdown(pending.join("\n")))); pending = []; } };
   lines.forEach((line, i) => {
     const m = ITEM.exec(line);
     if (!m) { pending.push(line); return; }
@@ -410,7 +500,7 @@ function bodyEl(n, card) {
         try { const up = await put({ ...n, body: l.join("\n") }, {}); card.replaceWith(noteEl(up, card.classList.contains("compact"))); refresh(); }
         catch (e) { alert(e.message); }
       } });
-    box.append(el("div", { className: "item" + (done ? " done" : "") }, cb, el("span", { className: "txt" }, renderText(m[4]))));
+    box.append(el("div", { className: "item" + (done ? " done" : "") }, cb, el("span", { className: "txt" }, renderInline(m[4]))));
   });
   flush();
   return box;
