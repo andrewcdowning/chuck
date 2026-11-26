@@ -51,16 +51,13 @@ pub struct TagCount {
     pub count: i64,
 }
 
-/// A virtual card: an open checklist item pulled from some note.
+/// One item on the standalone Todos card.
 #[derive(Debug, Serialize)]
-pub struct TodoItem {
-    pub note_id: i64,
-    /// Zero-based line index within the note body.
-    pub line: usize,
+pub struct TodoEntry {
+    pub id: i64,
     pub text: String,
-    /// First non-item line of the source note, as a label.
-    pub source: String,
-    pub tags: Vec<String>,
+    pub done: bool,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,8 +97,6 @@ pub trait NoteStore: Send + Sync + 'static {
     fn list(&self, owner: &str, q: &NoteQuery) -> Result<Vec<Note>>;
     fn tags(&self, owner: &str) -> Result<Vec<TagCount>>;
     fn get(&self, owner: &str, id: i64) -> Result<Note>;
-    /// Open checklist items across all notes, newest note first.
-    fn todos(&self, owner: &str) -> Result<Vec<TodoItem>>;
     /// Tags the user already has that fit `text`, best first. Local heuristics, no external calls.
     fn suggest_tags(&self, owner: &str, text: &str) -> Result<Vec<String>>;
     fn rules(&self, owner: &str) -> Result<Vec<Rule>>;
@@ -110,12 +105,15 @@ pub trait NoteStore: Send + Sync + 'static {
     /// Re-tags every note with the current rules. Returns how many notes changed.
     fn apply_rules(&self, owner: &str) -> Result<usize>;
 
-    /// Flip one checklist line. Provided in terms of `get` and `update`.
-    fn toggle_item(&self, owner: &str, id: i64, line: usize) -> Result<Note> {
-        let note = self.get(owner, id)?;
-        let body = toggle_line(&note.body, line).ok_or(StoreError::NotFound)?;
-        self.update(owner, id, &NoteInput { body, ..Default::default() })
-    }
+    // The standalone Todos card: one list per owner, not tied to any note. Open items first, then done.
+    fn todo_list(&self, owner: &str) -> Result<Vec<TodoEntry>>;
+    fn todo_add(&self, owner: &str, text: &str) -> Result<TodoEntry>;
+    /// `None` leaves a field unchanged.
+    fn todo_update(&self, owner: &str, id: i64, text: Option<&str>, done: Option<bool>) -> Result<TodoEntry>;
+    fn todo_delete(&self, owner: &str, id: i64) -> Result<()>;
+    /// Removes all completed items. Returns how many.
+    fn todo_clear_done(&self, owner: &str) -> Result<usize>;
+
 }
 
 /// Parses `- [ ] text`, `* [x] text` (leading whitespace allowed). Returns (done, text).
@@ -131,16 +129,6 @@ pub fn parse_item(line: &str) -> Option<(bool, &str)> {
     let text = chars.as_str();
     let text = text.strip_prefix(' ').unwrap_or(text);
     Some((mark != ' ', text))
-}
-
-/// Returns the body with the checkbox on `line` flipped, or None if that line is not a checklist item.
-pub fn toggle_line(body: &str, line: usize) -> Option<String> {
-    let mut lines: Vec<String> = body.split('\n').map(String::from).collect();
-    let l = lines.get_mut(line)?;
-    let (done, _) = parse_item(l)?;
-    let open = l.find('[')?;
-    l.replace_range(open + 1..open + 2, if done { " " } else { "x" });
-    Some(lines.join("\n"))
 }
 
 pub fn card_kind(body: &str, remind_at: Option<i64>) -> &'static str {
@@ -206,17 +194,12 @@ mod tests {
     }
 
     #[test]
-    fn items_and_toggle() {
+    fn checklist_items() {
         assert_eq!(parse_item("- [ ] milk"), Some((false, "milk")));
         assert_eq!(parse_item("  * [x] eggs"), Some((true, "eggs")));
         assert_eq!(parse_item("- [X]done"), Some((true, "done")));
         assert!(parse_item("- [y] no").is_none());
         assert!(parse_item("text [ ] x").is_none());
-        let body = "Groceries\n- [ ] milk\n- [x] eggs";
-        assert_eq!(toggle_line(body, 1).unwrap(), "Groceries\n- [x] milk\n- [x] eggs");
-        assert_eq!(toggle_line(body, 2).unwrap(), "Groceries\n- [ ] milk\n- [ ] eggs");
-        assert!(toggle_line(body, 0).is_none());
-        assert!(toggle_line(body, 9).is_none());
     }
 
     #[test]

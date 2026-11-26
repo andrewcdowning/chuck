@@ -36,7 +36,14 @@ impl SqliteStore {
                pattern TEXT NOT NULL,
                tag TEXT NOT NULL,
                created_at INTEGER NOT NULL);
-             CREATE INDEX IF NOT EXISTS tag_rules_owner ON tag_rules(owner);",
+             CREATE INDEX IF NOT EXISTS tag_rules_owner ON tag_rules(owner);
+             CREATE TABLE IF NOT EXISTS todo_items(
+               id INTEGER PRIMARY KEY,
+               owner TEXT NOT NULL,
+               text TEXT NOT NULL,
+               done INTEGER NOT NULL DEFAULT 0,
+               created_at INTEGER NOT NULL);
+             CREATE INDEX IF NOT EXISTS todo_items_owner ON todo_items(owner, done, id);",
         )?;
         // Additive migration for databases created before reminders existed.
         let has: i64 = conn.query_row(
@@ -211,35 +218,51 @@ impl NoteStore for SqliteStore {
         Self::load(&conn, owner, id)
     }
 
-    fn todos(&self, owner: &str) -> Result<Vec<TodoItem>> {
-        const MAX_ITEMS: usize = 500;
+    fn todo_list(&self, owner: &str) -> Result<Vec<TodoEntry>> {
         let conn = self.conn.lock().unwrap();
-        let mut st = conn.prepare(
-            "SELECT id, body FROM notes WHERE owner=?1 AND body LIKE '%[ ]%' ORDER BY created_at DESC, id DESC LIMIT 300",
-        )?;
-        let notes: Vec<(i64, String)> = st
-            .query_map([owner], |r| Ok((r.get(0)?, r.get(1)?)))?
+        let mut st = conn.prepare("SELECT id, text, done, created_at FROM todo_items WHERE owner=?1 ORDER BY done ASC, id ASC")?;
+        let rows = st
+            .query_map([owner], |r| Ok(TodoEntry { id: r.get(0)?, text: r.get(1)?, done: r.get::<_, i64>(2)? != 0, created_at: r.get(3)? }))?
             .collect::<std::result::Result<_, _>>()?;
-        let mut out = Vec::new();
-        for (id, body) in notes {
-            let source: String = body
-                .lines()
-                .find(|l| !l.trim().is_empty() && parse_item(l).is_none())
-                .unwrap_or("")
-                .chars()
-                .take(80)
-                .collect();
-            let tags = Self::load(&conn, owner, id)?.tags;
-            for (line, text) in body.split('\n').enumerate() {
-                if let Some((false, item)) = parse_item(text) {
-                    out.push(TodoItem { note_id: id, line, text: item.to_string(), source: source.clone(), tags: tags.clone() });
-                    if out.len() >= MAX_ITEMS {
-                        return Ok(out);
-                    }
-                }
-            }
+        Ok(rows)
+    }
+
+    fn todo_add(&self, owner: &str, text: &str) -> Result<TodoEntry> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM todo_items WHERE owner=?1", [owner], |r| r.get(0))?;
+        if n >= 1000 {
+            return Err(StoreError::Other("too many todos".into()));
         }
-        Ok(out)
+        let t = now();
+        conn.execute("INSERT INTO todo_items(owner, text, created_at) VALUES(?1, ?2, ?3)", params![owner, text, t])?;
+        Ok(TodoEntry { id: conn.last_insert_rowid(), text: text.to_string(), done: false, created_at: t })
+    }
+
+    fn todo_update(&self, owner: &str, id: i64, text: Option<&str>, done: Option<bool>) -> Result<TodoEntry> {
+        let conn = self.conn.lock().unwrap();
+        let cur = conn
+            .query_row(
+                "SELECT text, done, created_at FROM todo_items WHERE id=?1 AND owner=?2",
+                params![id, owner],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, i64>(2)?)),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+        let text = text.map(str::to_string).unwrap_or(cur.0);
+        let done = done.unwrap_or(cur.1);
+        conn.execute("UPDATE todo_items SET text=?1, done=?2 WHERE id=?3 AND owner=?4", params![text, done as i64, id, owner])?;
+        Ok(TodoEntry { id, text, done, created_at: cur.2 })
+    }
+
+    fn todo_delete(&self, owner: &str, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("DELETE FROM todo_items WHERE id=?1 AND owner=?2", params![id, owner])?;
+        if n == 0 { Err(StoreError::NotFound) } else { Ok(()) }
+    }
+
+    fn todo_clear_done(&self, owner: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM todo_items WHERE owner=?1 AND done=1", [owner])?)
     }
 
     fn suggest_tags(&self, owner: &str, text: &str) -> Result<Vec<String>> {
@@ -415,23 +438,37 @@ mod tests {
     }
 
     #[test]
-    fn todos_toggle_and_kinds() {
+    fn card_kinds() {
         let s = SqliteStore::open(":memory:").unwrap();
         let inp = |b: &str| NoteInput { body: b.into(), ..Default::default() };
-        let a = s.create("me", &inp("Groceries #home\n- [ ] milk\n- [x] eggs\n- [ ] bread")).unwrap();
-        s.create("me", &inp("plain note")).unwrap();
-        s.create("other", &inp("- [ ] not mine")).unwrap();
-        assert_eq!(a.kind, "list");
-        let t = s.todos("me").unwrap();
-        assert_eq!(t.iter().map(|i| (i.line, i.text.as_str())).collect::<Vec<_>>(), vec![(1, "milk"), (3, "bread")]);
-        assert_eq!(t[0].source, "Groceries #home");
-        assert_eq!(t[0].tags, vec!["home"]);
+        assert_eq!(s.create("me", &inp("Groceries\n- [ ] milk")).unwrap().kind, "list");
+        assert_eq!(s.create("me", &inp("plain")).unwrap().kind, "note");
+        let r = NoteInput { body: "x".into(), remind_at: Some(5), ..Default::default() };
+        assert_eq!(s.create("me", &r).unwrap().kind, "reminder");
+    }
 
-        let n = s.toggle_item("me", a.id, 1).unwrap();
-        assert!(n.body.contains("- [x] milk"));
-        assert_eq!(s.todos("me").unwrap().len(), 1);
-        assert!(matches!(s.toggle_item("other", a.id, 1), Err(StoreError::NotFound)));
-        assert!(matches!(s.toggle_item("me", a.id, 0), Err(StoreError::NotFound)));
+    #[test]
+    fn standalone_todos() {
+        let s = SqliteStore::open(":memory:").unwrap();
+        let a = s.todo_add("me", "buy milk").unwrap();
+        let b = s.todo_add("me", "call Bob").unwrap();
+        s.todo_add("other", "not mine").unwrap();
+
+        s.todo_update("me", a.id, None, Some(true)).unwrap();
+        // open items first, done items last
+        let l = s.todo_list("me").unwrap();
+        assert_eq!(l.iter().map(|t| (t.text.as_str(), t.done)).collect::<Vec<_>>(), vec![("call Bob", false), ("buy milk", true)]);
+
+        let e = s.todo_update("me", b.id, Some("call Bob back"), None).unwrap();
+        assert_eq!((e.text.as_str(), e.done), ("call Bob back", false));
+        assert!(matches!(s.todo_update("other", a.id, None, Some(false)), Err(StoreError::NotFound)));
+        assert!(matches!(s.todo_delete("other", a.id), Err(StoreError::NotFound)));
+
+        assert_eq!(s.todo_clear_done("me").unwrap(), 1);
+        assert_eq!(s.todo_list("me").unwrap().len(), 1);
+        assert_eq!(s.todo_list("other").unwrap().len(), 1);
+        s.todo_delete("me", b.id).unwrap();
+        assert!(s.todo_list("me").unwrap().is_empty());
     }
 
     #[test]

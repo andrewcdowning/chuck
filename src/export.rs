@@ -1,6 +1,6 @@
 //! Markdown export. Pure functions so any `NoteStore` can be exported the same way.
 
-use crate::store::Note;
+use crate::store::{Note, TodoEntry};
 
 /// Days since 1970-01-01 to (year, month, day), proleptic Gregorian (Howard Hinnant's algorithm).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
@@ -30,8 +30,14 @@ pub fn fmt_date(secs: i64) -> String {
 
 /// Renders notes oldest first. Each note becomes a section: a heading with its creation time, a metadata
 /// line (tags, reminder), then the body verbatim. Checklists are already Markdown task lists.
-pub fn to_markdown(notes: &[Note], now_secs: i64) -> String {
+pub fn to_markdown(notes: &[Note], todos: &[TodoEntry], now_secs: i64) -> String {
     let mut out = format!("# Chuck export\n\nExported {} · {} notes\n", fmt_utc(now_secs), notes.len());
+    if !todos.is_empty() {
+        out.push_str("\n---\n\n## Todos\n\n");
+        for t in todos {
+            out.push_str(&format!("- [{}] {}\n", if t.done { "x" } else { " " }, t.text));
+        }
+    }
     let mut ordered: Vec<&Note> = notes.iter().collect();
     ordered.sort_by_key(|n| (n.created_at, n.id));
     for n in ordered {
@@ -93,7 +99,9 @@ mod tests {
         let mut b = note(1, "Standup", 1_000_000_000);
         b.remind_at = Some(4_102_444_800);
         b.repeat = Some("weekdays".into());
-        let md = to_markdown(&[a, b], 1_795_732_903);
+        let todos = vec![TodoEntry { id: 1, text: "call Bob".into(), done: false, created_at: 0 }, TodoEntry { id: 2, text: "buy milk".into(), done: true, created_at: 0 }];
+        let md = to_markdown(&[a, b], &todos, 1_795_732_903);
+        assert!(md.contains("## Todos\n\n- [ ] call Bob\n- [x] buy milk\n"));
         assert!(md.starts_with("# Chuck export\n\nExported 2026-11-26 22:41 UTC · 2 notes\n"));
         // oldest first
         assert!(md.find("Standup").unwrap() < md.find("Groceries").unwrap());
@@ -105,6 +113,7 @@ mod tests {
 
     #[test]
     fn empty_export() {
-        assert!(to_markdown(&[], 0).contains("0 notes"));
+        let md = to_markdown(&[], &[], 0);
+        assert!(md.contains("0 notes") && !md.contains("Todos"));
     }
 }

@@ -26,8 +26,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notes/:id", put(update).delete(remove))
         .route("/api/tags", get(tags))
         .route("/api/export", get(export))
-        .route("/api/notes/:id/toggle", post(toggle))
         .route("/api/cards/todos", get(todos))
+        .route("/api/cards/todos/items", post(todo_add))
+        .route("/api/cards/todos/items/:id", put(todo_update).delete(todo_delete))
+        .route("/api/cards/todos/done", delete(todo_clear_done))
         .route("/api/suggest", post(suggest))
         .route("/api/rules", get(rules).post(add_rule))
         .route("/api/rules/apply", post(apply_rules))
@@ -122,23 +124,55 @@ async fn tags(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoRespon
     Ok(Json(blocking(move || st.tags(&o)).await?))
 }
 
-#[derive(Deserialize)]
-struct ToggleInput {
-    line: usize,
-}
-
-async fn toggle(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Json(b): Json<ToggleInput>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
-    let st = s.store.clone();
-    Ok(Json(blocking(move || st.toggle_item(&o, id, b.line)).await?))
-}
-
-/// A virtual card: every open checklist item across all notes, in the same card vocabulary as notes.
+/// The standalone Todos card, in the same card vocabulary as notes (`kind`).
 async fn todos(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
     let o = owner(&s, &h).await?;
     let st = s.store.clone();
-    let items = blocking(move || st.todos(&o)).await?;
-    Ok(Json(serde_json::json!({ "kind": "todos", "title": "Todos", "count": items.len(), "items": items })))
+    let items = blocking(move || st.todo_list(&o)).await?;
+    let done = items.iter().filter(|t| t.done).count();
+    Ok(Json(serde_json::json!({ "kind": "todos", "title": "Todos", "open": items.len() - done, "done": done, "items": items })))
+}
+
+#[derive(Deserialize)]
+struct TodoInput {
+    text: Option<String>,
+    done: Option<bool>,
+}
+
+fn todo_text(t: &str) -> Result<String, ApiError> {
+    let t = t.trim();
+    if t.is_empty() || t.chars().count() > 500 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "todo text must be 1 to 500 characters".into()));
+    }
+    Ok(t.to_string())
+}
+
+async fn todo_add(State(s): State<AppState>, h: HeaderMap, Json(b): Json<TodoInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let text = todo_text(b.text.as_deref().unwrap_or(""))?;
+    let st = s.store.clone();
+    Ok((StatusCode::CREATED, Json(blocking(move || st.todo_add(&o, &text)).await?)))
+}
+
+async fn todo_update(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Json(b): Json<TodoInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let text = b.text.as_deref().map(todo_text).transpose()?;
+    let st = s.store.clone();
+    Ok(Json(blocking(move || st.todo_update(&o, id, text.as_deref(), b.done)).await?))
+}
+
+async fn todo_delete(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let st = s.store.clone();
+    blocking(move || st.todo_delete(&o, id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn todo_clear_done(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let st = s.store.clone();
+    let removed = blocking(move || st.todo_clear_done(&o)).await?;
+    Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
 #[derive(Deserialize)]
@@ -188,8 +222,10 @@ async fn apply_rules(State(s): State<AppState>, h: HeaderMap) -> Result<impl Int
 /// Markdown download of every note (or the notes matching the same filters as `/api/notes`; paging is ignored).
 async fn export(State(s): State<AppState>, h: HeaderMap, Query(mut q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
     let o = owner(&s, &h).await?;
+    // The standalone todo list is part of a full export only; a filtered export is just matching notes.
+    let unfiltered = q.q.is_none() && q.tag.is_none() && q.from.is_none() && q.to.is_none() && q.reminders != Some(true);
     let st = s.store.clone();
-    let notes = blocking(move || {
+    let (notes, todos) = blocking(move || {
         const PAGE: u32 = 200;
         let mut all = Vec::new();
         let mut offset = 0;
@@ -200,14 +236,15 @@ async fn export(State(s): State<AppState>, h: HeaderMap, Query(mut q): Query<Not
             let n = page.len() as u32;
             all.extend(page);
             if n < PAGE {
-                return Ok(all);
+                let todos = if unfiltered { st.todo_list(&o)? } else { Vec::new() };
+                return Ok((all, todos));
             }
             offset += PAGE;
         }
     })
     .await?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    let body = crate::export::to_markdown(&notes, now);
+    let body = crate::export::to_markdown(&notes, &todos, now);
     let disposition = format!("attachment; filename=\"chuck-export-{}.md\"", crate::export::fmt_date(now));
     Ok((
         [
