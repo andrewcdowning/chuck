@@ -16,6 +16,8 @@ Everything on the feed or board is a card with a `kind`: `note`, `list` (a note 
 - **Tag suggestions:** while you type, Chuck suggests tags you already use, from keyword co-occurrence in your own notes. Local only, no external calls.
 - **Auto-tag rules:** "if a note contains `jira` or `PR-`, add `#work`". Applied on save, and to existing notes on demand. See the sidebar panel.
 
+- **Export:** the **Export .md** button downloads one Markdown file, oldest first, with tags and reminders as metadata. It follows the active tag, search and date filters. API: `GET /api/export` (same filter parameters as `/api/notes`; paging is ignored).
+
 ## Extension points
 
 - `store::NoteStore`: storage trait. Add Postgres/DynamoDB by implementing it and choosing it in `main.rs`.
