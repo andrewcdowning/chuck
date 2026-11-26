@@ -104,6 +104,11 @@ impl SqliteStore {
         tags
     }
 
+    fn todo_row(r: &rusqlite::Row, rules: &[(String, String)]) -> rusqlite::Result<TodoEntry> {
+        let text: String = r.get(1)?;
+        Ok(TodoEntry { id: r.get(0)?, tags: Self::tags_for(rules, &text), text, done: r.get::<_, i64>(2)? != 0, created_at: r.get(3)? })
+    }
+
     fn set_tags(conn: &Connection, owner: &str, id: i64, body: &str) -> Result<()> {
         let rules = Self::rule_pairs(conn, owner)?;
         conn.execute("DELETE FROM note_tags WHERE note_id=?1", [id])?;
@@ -220,10 +225,9 @@ impl NoteStore for SqliteStore {
 
     fn todo_list(&self, owner: &str) -> Result<Vec<TodoEntry>> {
         let conn = self.conn.lock().unwrap();
+        let rules = Self::rule_pairs(&conn, owner)?;
         let mut st = conn.prepare("SELECT id, text, done, created_at FROM todo_items WHERE owner=?1 ORDER BY done ASC, id ASC")?;
-        let rows = st
-            .query_map([owner], |r| Ok(TodoEntry { id: r.get(0)?, text: r.get(1)?, done: r.get::<_, i64>(2)? != 0, created_at: r.get(3)? }))?
-            .collect::<std::result::Result<_, _>>()?;
+        let rows = st.query_map([owner], |r| Self::todo_row(r, &rules))?.collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }
 
@@ -235,7 +239,8 @@ impl NoteStore for SqliteStore {
         }
         let t = now();
         conn.execute("INSERT INTO todo_items(owner, text, created_at) VALUES(?1, ?2, ?3)", params![owner, text, t])?;
-        Ok(TodoEntry { id: conn.last_insert_rowid(), text: text.to_string(), done: false, created_at: t })
+        let tags = Self::tags_for(&Self::rule_pairs(&conn, owner)?, text);
+        Ok(TodoEntry { id: conn.last_insert_rowid(), text: text.to_string(), done: false, created_at: t, tags })
     }
 
     fn todo_update(&self, owner: &str, id: i64, text: Option<&str>, done: Option<bool>) -> Result<TodoEntry> {
@@ -251,7 +256,8 @@ impl NoteStore for SqliteStore {
         let text = text.map(str::to_string).unwrap_or(cur.0);
         let done = done.unwrap_or(cur.1);
         conn.execute("UPDATE todo_items SET text=?1, done=?2 WHERE id=?3 AND owner=?4", params![text, done as i64, id, owner])?;
-        Ok(TodoEntry { id, text, done, created_at: cur.2 })
+        let tags = Self::tags_for(&Self::rule_pairs(&conn, owner)?, &text);
+        Ok(TodoEntry { id, text, done, created_at: cur.2, tags })
     }
 
     fn todo_delete(&self, owner: &str, id: i64) -> Result<()> {
@@ -376,14 +382,25 @@ impl NoteStore for SqliteStore {
     fn tags(&self, owner: &str) -> Result<Vec<TagCount>> {
         let conn = self.conn.lock().unwrap();
         let mut st = conn.prepare(
-            "SELECT t.tag, COUNT(*) c FROM note_tags t JOIN notes n ON n.id=t.note_id
-             WHERE n.owner=?1 GROUP BY t.tag ORDER BY c DESC, t.tag",
+            "SELECT t.tag, COUNT(*) FROM note_tags t JOIN notes n ON n.id=t.note_id WHERE n.owner=?1 GROUP BY t.tag",
         )?;
-        let rows = st
-            .query_map([owner], |r| Ok(TagCount { tag: r.get(0)?, count: r.get(1)? }))?
+        let mut counts: std::collections::HashMap<String, i64> = st
+            .query_map([owner], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
             .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
+        // Tags on todo items count too, so a tag used only on todos still shows up as a filter.
+        let rules = Self::rule_pairs(&conn, owner)?;
+        let mut st = conn.prepare("SELECT id, text, done, created_at FROM todo_items WHERE owner=?1")?;
+        let todos: Vec<TodoEntry> = st.query_map([owner], |r| Self::todo_row(r, &rules))?.collect::<std::result::Result<_, _>>()?;
+        for t in todos {
+            for tag in t.tags {
+                *counts.entry(tag).or_default() += 1;
+            }
+        }
+        let mut out: Vec<TagCount> = counts.into_iter().map(|(tag, count)| TagCount { tag, count }).collect();
+        out.sort_by(|a, b| b.count.cmp(&a.count).then(a.tag.cmp(&b.tag)));
+        Ok(out)
     }
+
 }
 
 #[cfg(test)]
@@ -469,6 +486,26 @@ mod tests {
         assert_eq!(s.todo_list("other").unwrap().len(), 1);
         s.todo_delete("me", b.id).unwrap();
         assert!(s.todo_list("me").unwrap().is_empty());
+    }
+
+    #[test]
+    fn todo_tags_and_filters() {
+        let s = SqliteStore::open(":memory:").unwrap();
+        s.add_rule("me", "jira", "work").unwrap();
+        let a = s.todo_add("me", "file jira ticket #urgent").unwrap();
+        s.todo_add("me", "buy milk #home").unwrap();
+        s.todo_add("other", "x #home").unwrap();
+        s.create("me", &NoteInput { body: "note about #home".into(), ..Default::default() }).unwrap();
+
+        assert_eq!(a.tags, vec!["urgent", "work"]); // written tag plus rule tag
+        let l = s.todo_list("me").unwrap();
+        assert_eq!(l[1].tags, vec!["home"]);
+        // an edit re-derives tags
+        let u = s.todo_update("me", a.id, Some("file ticket #later"), None).unwrap();
+        assert_eq!(u.tags, vec!["later"]);
+        // tag counts combine notes and todos, per owner
+        let counts: Vec<(String, i64)> = s.tags("me").unwrap().into_iter().map(|t| (t.tag, t.count)).collect();
+        assert_eq!(counts, vec![("home".to_string(), 2), ("later".to_string(), 1)]);
     }
 
     #[test]

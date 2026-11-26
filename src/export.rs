@@ -99,7 +99,7 @@ mod tests {
         let mut b = note(1, "Standup", 1_000_000_000);
         b.remind_at = Some(4_102_444_800);
         b.repeat = Some("weekdays".into());
-        let todos = vec![TodoEntry { id: 1, text: "call Bob".into(), done: false, created_at: 0 }, TodoEntry { id: 2, text: "buy milk".into(), done: true, created_at: 0 }];
+        let todos = vec![TodoEntry { id: 1, text: "call Bob".into(), done: false, created_at: 0, tags: vec![] }, TodoEntry { id: 2, text: "buy milk".into(), done: true, created_at: 0, tags: vec![] }];
         let md = to_markdown(&[a, b], &todos, 1_795_732_903);
         assert!(md.contains("## Todos\n\n- [ ] call Bob\n- [x] buy milk\n"));
         assert!(md.starts_with("# Chuck export\n\nExported 2026-11-26 22:41 UTC · 2 notes\n"));

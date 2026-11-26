@@ -58,6 +58,8 @@ pub struct TodoEntry {
     pub text: String,
     pub done: bool,
     pub created_at: i64,
+    /// `#tags` written in the text plus tags added by the owner's auto-tag rules. Derived, not stored.
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

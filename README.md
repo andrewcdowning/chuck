@@ -12,7 +12,7 @@ Env: `CHUCK_DB` (db path), `CHUCK_ADDR` (bind address, default loopback), `CHUCK
 
 Everything on the feed or board is a card with a `kind`: `note`, `list` (a note with `- [ ]` items, with progress), `reminder`, and the standalone `todos` card. Feed and board only lay cards out. Add a card type by registering a renderer in `CARD_RENDERERS` in `static/index.html`.
 
-- **Todos card:** one standalone todo list per user. You add items to it directly; they do not belong to any note, so nothing is shown twice. Items can be ticked, edited in place and deleted, and done items cleared in one click. It is the first card in the feed and the first column on the board, and it is included in a full export.
+- **Todos card:** one standalone todo list per user. You add items to it directly; they do not belong to any note, so nothing is shown twice. Items can be ticked, edited in place and deleted, and done items cleared in one click. Write `#tags` in a todo (auto-tag rules apply too): tagged todos show as chips, count toward the sidebar tag filters, and the card follows the active tag filter, so adding a todo while viewing `#work` tags it `#work`. It is the first card in the feed and the first column on the board, and it is included in a full export.
 - **Tag suggestions:** while you type, Chuck suggests tags you already use, from keyword co-occurrence in your own notes. Local only, no external calls.
 - **Auto-tag rules:** "if a note contains `jira` or `PR-`, add `#work`". Applied on save, and to existing notes on demand. See the sidebar panel.
 

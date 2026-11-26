@@ -124,13 +124,23 @@ async fn tags(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoRespon
     Ok(Json(blocking(move || st.tags(&o)).await?))
 }
 
+#[derive(Deserialize)]
+struct TodoQuery {
+    tag: Option<String>,
+}
+
 /// The standalone Todos card, in the same card vocabulary as notes (`kind`).
-async fn todos(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
+/// `?tag=x` keeps only items carrying that tag, so the card follows the tag filter.
+async fn todos(State(s): State<AppState>, h: HeaderMap, Query(q): Query<TodoQuery>) -> Result<impl IntoResponse, ApiError> {
     let o = owner(&s, &h).await?;
+    let tag = q.tag.as_deref().filter(|t| !t.is_empty()).map(|t| normalize_tag(t).ok_or(ApiError(StatusCode::BAD_REQUEST, "invalid tag".into()))).transpose()?;
     let st = s.store.clone();
-    let items = blocking(move || st.todo_list(&o)).await?;
+    let mut items = blocking(move || st.todo_list(&o)).await?;
+    if let Some(t) = &tag {
+        items.retain(|i| i.tags.contains(t));
+    }
     let done = items.iter().filter(|t| t.done).count();
-    Ok(Json(serde_json::json!({ "kind": "todos", "title": "Todos", "open": items.len() - done, "done": done, "items": items })))
+    Ok(Json(serde_json::json!({ "kind": "todos", "title": "Todos", "tag": tag, "open": items.len() - done, "done": done, "items": items })))
 }
 
 #[derive(Deserialize)]

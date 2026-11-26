@@ -105,7 +105,7 @@
   .note.compact .head { font-size: 10px; letter-spacing: .06em; flex-wrap: wrap; row-gap: 2px; }
   .note .head > span:first-child { white-space: nowrap; flex: none; }
   .todo { display: flex; gap: 10px; align-items: center; padding: 2px 0; }
-  .todo input.txt { flex: 1; width: auto; padding: 4px 6px; border: var(--bw) solid transparent; background: transparent; border-radius: 8px; font: inherit; }
+  .todo input.txt { flex: 1; min-width: 60px; width: auto; padding: 4px 6px; border: var(--bw) solid transparent; background: transparent; border-radius: 8px; font: inherit; }
   .todo input.txt:hover, .todo input.txt:focus { border-color: var(--edge); background: var(--field); }
   .todo.done input.txt { text-decoration: line-through; color: var(--mu); }
   .todo.done .box { background: var(--tx); }
@@ -183,7 +183,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const PAGE = 50, BOARD_MAX = 200;
-let filter = "";            // "" | tag name | "@reminders"
+let filter = new URLSearchParams(location.search).get("tag") || "";   // "" | tag name | "@reminders"
 let view = new URLSearchParams(location.search).get("view") || localStorage.getItem("chuck-view") || "feed";
 let mode = "note";
 let offset = 0;
@@ -461,7 +461,10 @@ function edit(card, n, compact) {
 function todosCardEl(card, compact) {
   const box = el("div", { className: "note todos-card" + (compact ? " compact" : "") });
   const rerender = async () => {
-    try { box.replaceWith(todosCardEl(await api("/api/cards/todos"), compact)); } catch (e) { alert(e.message); }
+    try {
+      box.replaceWith(todosCardEl(await api("/api/cards/todos" + (card.tag ? "?tag=" + encodeURIComponent(card.tag) : "")), compact));
+      loadFilters();
+    } catch (e) { alert(e.message); }
   };
   const call = async (fn) => { try { await fn(); await rerender(); } catch (e) { alert(e.message); } };
   const content = el("div", { className: "content" });
@@ -474,18 +477,24 @@ function todosCardEl(card, compact) {
     txt.addEventListener("keydown", e => { if (e.key === "Enter") txt.blur(); });
     const del = el("button", { className: "x", type: "button", textContent: "×", title: "Delete",
       onclick: () => call(() => api("/api/cards/todos/items/" + t.id, { method: "DELETE" })) });
-    content.append(el("div", { className: "todo" + (t.done ? " done" : "") }, cb, txt, del));
+    const chips = t.tags.map(tg => { const c = el("span", { className: "tag", textContent: "#" + tg, title: "Show #" + tg, onclick: () => pick(tg) }); paint(c, tg); return c; });
+    content.append(el("div", { className: "todo" + (t.done ? " done" : "") }, cb, txt, ...chips, del));
   });
-  if (!card.items.length) content.append(el("div", { className: "hint", textContent: "Nothing to do. Add a todo below." }));
-  const add = el("input", { placeholder: "Add todo, press Enter", maxLength: 500, "aria-label": "Add todo" });
+  if (!card.items.length) content.append(el("div", { className: "hint", textContent: card.tag ? "No todos tagged #" + card.tag + ". Add one below." : "Nothing to do. Add a todo below." }));
+  const add = el("input", { placeholder: card.tag ? "Add todo (gets #" + card.tag + "), press Enter" : "Add todo, press Enter", maxLength: 500, "aria-label": "Add todo" });
+  const sugg = el("div", { className: "sugg" });
+  attachSuggest([add], add, sugg);
   add.addEventListener("keydown", e => {
     if (e.key !== "Enter" || !add.value.trim()) return;
-    call(() => api("/api/cards/todos/items", { method: "POST", body: JSON.stringify({ text: add.value }) }));
+    let text = add.value.trim();
+    // In a tag-filtered view the new todo joins that tag, so it stays visible after adding.
+    if (card.tag && !new RegExp("(^|\\s)#" + card.tag + "(?![\\p{L}\\p{N}_-])", "iu").test(text)) text += " #" + card.tag;
+    call(() => api("/api/cards/todos/items", { method: "POST", body: JSON.stringify({ text }) }));
   });
   const foot = el("div", { className: "todo-foot" }, add);
   if (card.done) foot.append(el("button", { className: "btn sm", type: "button", textContent: `Clear ${card.done} done`,
     onclick: () => call(() => api("/api/cards/todos/done", { method: "DELETE" })) }));
-  content.append(foot);
+  content.append(foot, sugg);
   const total = card.open + card.done;
   const pct = total ? Math.round(100 * card.done / total) : 0;
   box.append(el("div", { className: "head" }, el("span", { textContent: "Todos" }),
@@ -559,10 +568,14 @@ async function loadFeed(reset) {
   const extra = { limit: PAGE, offset };
   if (filter === "@reminders") extra.reminders = "true"; else if (filter) extra.tag = filter;
   const notes = await api("/api/notes?" + params(extra));
-  if (reset && !$("q").value.trim() && !filter) $("out").append(cardEl(await api("/api/cards/todos"), false));
+  let todosShown = false;
+  if (reset && !$("q").value.trim() && filter !== "@reminders") {
+    $("out").append(cardEl(await api("/api/cards/todos" + (filter ? "?tag=" + encodeURIComponent(filter) : "")), false));
+    todosShown = true;
+  }
   notes.forEach(n => $("out").append(cardEl(n, false)));
   offset += notes.length;
-  if (reset && !notes.length) $("out").append(el("div", { className: "empty", textContent: filter === "@reminders" ? "No pending reminders" : "Nothing here yet" }));
+  if (reset && !notes.length && !todosShown) $("out").append(el("div", { className: "empty", textContent: filter === "@reminders" ? "No pending reminders" : "Nothing here yet" }));
   $("more").hidden = notes.length < PAGE;
 }
 
