@@ -15,4 +15,8 @@ Env: `CHUCK_DB` (db path), `CHUCK_ADDR` (bind address, default loopback), `CHUCK
 
 ## Hosting later on AWS
 
-Bind `0.0.0.0` only behind an authenticating ALB. SQLite on EFS is not recommended; switch to a `NoteStore` for RDS/DynamoDB.
+See [docs/AWS.md](docs/AWS.md). A `Dockerfile` is included. Chuck has no real authentication yet, so do not expose it to a network before adding one.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
