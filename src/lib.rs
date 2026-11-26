@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod export;
 pub mod sqlite;
 pub mod store;
 

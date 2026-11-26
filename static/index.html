@@ -56,7 +56,8 @@
   .row > input[type=search], .row > input:not([type]) { flex: 1; min-width: 140px; }
   button.btn { font: 600 13px var(--ui); padding: 7px 16px; border: var(--bw) solid var(--edge); border-radius: 999px; background: var(--field); color: var(--tx); cursor: pointer; }
   button.btn.primary { background: var(--on-bg); color: var(--on-tx); }
-  button.btn.sm { padding: 3px 10px; font-size: 12px; }
+  button.btn.sm, a.btn.sm { padding: 3px 10px; font-size: 12px; }
+  a.btn { display: inline-block; font: 600 13px var(--ui); padding: 7px 16px; border: var(--bw) solid var(--edge); border-radius: 999px; background: var(--field); color: var(--tx); cursor: pointer; }
   button.btn:active { transform: scale(.97); }
   .hint { color: var(--mu); font: 500 11px var(--mono); }
   .err { color: #b91c1c; font: 500 12px var(--mono); }
@@ -152,6 +153,7 @@
       <div class="seg" id="views" role="group" aria-label="View"><button data-v="feed">Feed</button><button data-v="board">Board</button></div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <button class="btn sm" id="notify" hidden>Enable alerts</button>
+        <a class="btn sm" id="export" href="/api/export" download style="text-decoration:none">Export .md</a>
         <div class="seg" id="themes" role="group" aria-label="Theme"><button data-t="dark">Dark</button><button data-t="ink">Ink</button><button data-t="light">Light</button></div>
       </div>
     </div>
@@ -605,7 +607,15 @@ async function loadFilters() {
 
 let pendingReminders = [];
 function pick(f) { filter = f; refresh(); }
+function syncExport() {
+  const p = params();
+  p.delete("limit"); p.delete("offset");
+  if (filter && filter !== "@reminders") p.set("tag", filter);
+  if (filter === "@reminders") p.set("reminders", "true");
+  $("export").href = "/api/export" + (p.toString() ? "?" + p : "");
+}
 async function refresh() {
+  syncExport();
   try {
     await (view === "board" ? loadBoard() : loadFeed(true));
     await loadFilters();

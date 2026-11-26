@@ -25,6 +25,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notes", get(list).post(create))
         .route("/api/notes/:id", put(update).delete(remove))
         .route("/api/tags", get(tags))
+        .route("/api/export", get(export))
         .route("/api/notes/:id/toggle", post(toggle))
         .route("/api/cards/todos", get(todos))
         .route("/api/suggest", post(suggest))
@@ -182,4 +183,38 @@ async fn apply_rules(State(s): State<AppState>, h: HeaderMap) -> Result<impl Int
     let st = s.store.clone();
     let changed = blocking(move || st.apply_rules(&o)).await?;
     Ok(Json(serde_json::json!({ "changed": changed })))
+}
+
+/// Markdown download of every note (or the notes matching the same filters as `/api/notes`; paging is ignored).
+async fn export(State(s): State<AppState>, h: HeaderMap, Query(mut q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let st = s.store.clone();
+    let notes = blocking(move || {
+        const PAGE: u32 = 200;
+        let mut all = Vec::new();
+        let mut offset = 0;
+        loop {
+            q.limit = Some(PAGE);
+            q.offset = Some(offset);
+            let page = st.list(&o, &q)?;
+            let n = page.len() as u32;
+            all.extend(page);
+            if n < PAGE {
+                return Ok(all);
+            }
+            offset += PAGE;
+        }
+    })
+    .await?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let body = crate::export::to_markdown(&notes, now);
+    let disposition = format!("attachment; filename=\"chuck-export-{}.md\"", crate::export::fmt_date(now));
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8".to_string()),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        body,
+    ))
 }
