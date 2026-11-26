@@ -1,10 +1,11 @@
 use crate::auth::Authenticator;
-use crate::store::{NoteInput, NoteQuery, NoteStore, StoreError, REPEATS};
+use crate::store::{normalize_tag, NoteInput, NoteQuery, NoteStore, RuleInput, StoreError, REPEATS};
+use serde::Deserialize;
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
-    routing::{get, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use std::sync::Arc;
@@ -24,6 +25,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notes", get(list).post(create))
         .route("/api/notes/:id", put(update).delete(remove))
         .route("/api/tags", get(tags))
+        .route("/api/notes/:id/toggle", post(toggle))
+        .route("/api/cards/todos", get(todos))
+        .route("/api/suggest", post(suggest))
+        .route("/api/rules", get(rules).post(add_rule))
+        .route("/api/rules/apply", post(apply_rules))
+        .route("/api/rules/:id", delete(delete_rule))
         .with_state(state)
 }
 
@@ -112,4 +119,67 @@ async fn tags(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoRespon
     let o = owner(&s, &h).await?;
     let st = s.store.clone();
     Ok(Json(blocking(move || st.tags(&o)).await?))
+}
+
+#[derive(Deserialize)]
+struct ToggleInput {
+    line: usize,
+}
+
+async fn toggle(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Json(b): Json<ToggleInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let st = s.store.clone();
+    Ok(Json(blocking(move || st.toggle_item(&o, id, b.line)).await?))
+}
+
+/// A virtual card: every open checklist item across all notes, in the same card vocabulary as notes.
+async fn todos(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let st = s.store.clone();
+    let items = blocking(move || st.todos(&o)).await?;
+    Ok(Json(serde_json::json!({ "kind": "todos", "title": "Todos", "count": items.len(), "items": items })))
+}
+
+#[derive(Deserialize)]
+struct SuggestInput {
+    text: String,
+}
+
+async fn suggest(State(s): State<AppState>, h: HeaderMap, Json(b): Json<SuggestInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let text: String = b.text.chars().take(MAX_BODY).collect();
+    let st = s.store.clone();
+    Ok(Json(blocking(move || st.suggest_tags(&o, &text)).await?))
+}
+
+async fn rules(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let st = s.store.clone();
+    Ok(Json(blocking(move || st.rules(&o)).await?))
+}
+
+async fn add_rule(State(s): State<AppState>, h: HeaderMap, Json(b): Json<RuleInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let pattern = b.pattern.trim().to_string();
+    if pattern.is_empty() || pattern.chars().count() > 200 || !pattern.split(|c| c == '|' || c == ',').any(|k| !k.trim().is_empty()) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "keywords are empty or too long".into()));
+    }
+    let tag = normalize_tag(&b.tag).ok_or(ApiError(StatusCode::BAD_REQUEST, "invalid tag name".into()))?;
+    let st = s.store.clone();
+    let r = blocking(move || st.add_rule(&o, &pattern, &tag)).await?;
+    Ok((StatusCode::CREATED, Json(r)))
+}
+
+async fn delete_rule(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let st = s.store.clone();
+    blocking(move || st.delete_rule(&o, id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn apply_rules(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let st = s.store.clone();
+    let changed = blocking(move || st.apply_rules(&o)).await?;
+    Ok(Json(serde_json::json!({ "changed": changed })))
 }

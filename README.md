@@ -8,6 +8,14 @@ Local-first capture app: notes with `#tags`, full-text search, date filters. Rus
 
 Env: `CHUCK_DB` (db path), `CHUCK_ADDR` (bind address, default loopback), `CHUCK_AUTH` (auth providers, see [docs/AUTH.md](docs/AUTH.md)).
 
+## Cards
+
+Everything on the feed or board is a card with a `kind`: `note`, `list` (a note with `- [ ]` items, with progress), `reminder`, and the virtual `todos` card that gathers every open item from every list. Feed and board only lay cards out. Add a card type by registering a renderer in `CARD_RENDERERS` in `static/index.html`.
+
+- **Todos card:** open items grouped by source note; ticking one updates the source note.
+- **Tag suggestions:** while you type, Chuck suggests tags you already use, from keyword co-occurrence in your own notes. Local only, no external calls.
+- **Auto-tag rules:** "if a note contains `jira` or `PR-`, add `#work`". Applied on save, and to existing notes on demand. See the sidebar panel.
+
 ## Extension points
 
 - `store::NoteStore`: storage trait. Add Postgres/DynamoDB by implementing it and choosing it in `main.rs`.

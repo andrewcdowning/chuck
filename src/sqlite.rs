@@ -29,7 +29,14 @@ impl SqliteStore {
                tag TEXT NOT NULL,
                PRIMARY KEY(note_id, tag));
              CREATE INDEX IF NOT EXISTS note_tags_tag ON note_tags(tag);
-             CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(body);",
+             CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(body);
+             CREATE TABLE IF NOT EXISTS tag_rules(
+               id INTEGER PRIMARY KEY,
+               owner TEXT NOT NULL,
+               pattern TEXT NOT NULL,
+               tag TEXT NOT NULL,
+               created_at INTEGER NOT NULL);
+             CREATE INDEX IF NOT EXISTS tag_rules_owner ON tag_rules(owner);",
         )?;
         // Additive migration for databases created before reminders existed.
         let has: i64 = conn.query_row(
@@ -53,6 +60,7 @@ impl SqliteStore {
                 |r| {
                     Ok(Note {
                         id: r.get(0)?,
+                        kind: "note",
                         body: r.get(1)?,
                         tags: vec![],
                         created_at: r.get(2)?,
@@ -67,12 +75,32 @@ impl SqliteStore {
             .ok_or(StoreError::NotFound)?;
         let mut st = conn.prepare("SELECT tag FROM note_tags WHERE note_id=?1 ORDER BY tag")?;
         note.tags = st.query_map([id], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+        note.kind = card_kind(&note.body, note.remind_at);
         Ok(note)
     }
 
-    fn set_tags(conn: &Connection, id: i64, body: &str) -> Result<()> {
+    fn rule_pairs(conn: &Connection, owner: &str) -> Result<Vec<(String, String)>> {
+        let mut st = conn.prepare("SELECT pattern, tag FROM tag_rules WHERE owner=?1 ORDER BY id")?;
+        let rows = st.query_map([owner], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Tags written in the text plus tags added by the owner's rules.
+    fn tags_for(rules: &[(String, String)], body: &str) -> Vec<String> {
+        let mut tags = extract_tags(body);
+        let lower = body.to_lowercase();
+        for (pattern, tag) in rules {
+            if rule_matches(pattern, &lower) && !tags.contains(tag) {
+                tags.push(tag.clone());
+            }
+        }
+        tags
+    }
+
+    fn set_tags(conn: &Connection, owner: &str, id: i64, body: &str) -> Result<()> {
+        let rules = Self::rule_pairs(conn, owner)?;
         conn.execute("DELETE FROM note_tags WHERE note_id=?1", [id])?;
-        for t in extract_tags(body) {
+        for t in Self::tags_for(&rules, body) {
             conn.execute("INSERT OR IGNORE INTO note_tags(note_id, tag) VALUES(?1, ?2)", params![id, t])?;
         }
         Ok(())
@@ -103,7 +131,7 @@ impl NoteStore for SqliteStore {
         )?;
         let id = conn.last_insert_rowid();
         conn.execute("INSERT INTO notes_fts(rowid, body) VALUES(?1, ?2)", params![id, body])?;
-        Self::set_tags(&conn, id, body)?;
+        Self::set_tags(&conn, owner, id, body)?;
         Self::load(&conn, owner, id)
     }
 
@@ -129,7 +157,7 @@ impl NoteStore for SqliteStore {
             params![body, now(), remind_at, repeat, done as i64, id, owner],
         )?;
         conn.execute("UPDATE notes_fts SET body=?1 WHERE rowid=?2", params![body, id])?;
-        Self::set_tags(&conn, id, body)?;
+        Self::set_tags(&conn, owner, id, body)?;
         Self::load(&conn, owner, id)
     }
 
@@ -176,6 +204,150 @@ impl NoteStore for SqliteStore {
             .query_map(params_from_iter(args), |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?;
         ids.into_iter().map(|id| Self::load(&conn, owner, id)).collect()
+    }
+
+    fn get(&self, owner: &str, id: i64) -> Result<Note> {
+        let conn = self.conn.lock().unwrap();
+        Self::load(&conn, owner, id)
+    }
+
+    fn todos(&self, owner: &str) -> Result<Vec<TodoItem>> {
+        const MAX_ITEMS: usize = 500;
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare(
+            "SELECT id, body FROM notes WHERE owner=?1 AND body LIKE '%[ ]%' ORDER BY created_at DESC, id DESC LIMIT 300",
+        )?;
+        let notes: Vec<(i64, String)> = st
+            .query_map([owner], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut out = Vec::new();
+        for (id, body) in notes {
+            let source: String = body
+                .lines()
+                .find(|l| !l.trim().is_empty() && parse_item(l).is_none())
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect();
+            let tags = Self::load(&conn, owner, id)?.tags;
+            for (line, text) in body.split('\n').enumerate() {
+                if let Some((false, item)) = parse_item(text) {
+                    out.push(TodoItem { note_id: id, line, text: item.to_string(), source: source.clone(), tags: tags.clone() });
+                    if out.len() >= MAX_ITEMS {
+                        return Ok(out);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn suggest_tags(&self, owner: &str, text: &str) -> Result<Vec<String>> {
+        const STOP: [&str; 24] = [
+            "the", "and", "for", "with", "that", "this", "from", "have", "has", "was", "were", "are", "but", "not", "you",
+            "your", "about", "into", "need", "get", "got", "just", "then", "them",
+        ];
+        let conn = self.conn.lock().unwrap();
+        let rules = Self::rule_pairs(&conn, owner)?;
+        // Tags already written or about to be added by a rule are not suggestions.
+        let taken = Self::tags_for(&rules, text);
+
+        let mut words: Vec<String> = Vec::new();
+        for w in text.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+            if w.chars().count() >= 3 && !STOP.contains(&w) && !words.iter().any(|x| x == w) {
+                words.push(w.to_string());
+            }
+            if words.len() >= 12 {
+                break;
+            }
+        }
+
+        let mut scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        // 1. The tag's own name appears in the text.
+        let mut st = conn.prepare(
+            "SELECT DISTINCT t.tag FROM note_tags t JOIN notes n ON n.id=t.note_id WHERE n.owner=?1",
+        )?;
+        let existing: Vec<String> = st.query_map([owner], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+        for tag in &existing {
+            if words.iter().any(|w| w == tag || (w.len() >= 4 && tag.len() >= 4 && (tag.starts_with(w.as_str()) || w.starts_with(tag.as_str())))) {
+                *scores.entry(tag.clone()).or_default() += 1.5;
+            }
+        }
+        // 2. Words that usually appear in notes carrying a tag.
+        for w in &words {
+            let Some(fq) = fts_query(w) else { continue };
+            let df: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM notes n WHERE n.owner=?1 AND n.id IN (SELECT rowid FROM notes_fts WHERE notes_fts MATCH ?2)",
+                params![owner, fq],
+                |r| r.get(0),
+            )?;
+            if df == 0 {
+                continue;
+            }
+            let weight = (df.min(2) as f64) / 2.0; // a word seen in one note only is weak evidence
+            let mut st = conn.prepare(
+                "SELECT t.tag, COUNT(*) FROM note_tags t JOIN notes n ON n.id=t.note_id
+                 WHERE n.owner=?1 AND t.note_id IN (SELECT rowid FROM notes_fts WHERE notes_fts MATCH ?2) GROUP BY t.tag",
+            )?;
+            let rows: Vec<(String, i64)> = st
+                .query_map(params![owner, fq], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            for (tag, cnt) in rows {
+                *scores.entry(tag).or_default() += (cnt as f64 / df as f64) * weight;
+            }
+        }
+        let mut ranked: Vec<(String, f64)> = scores.into_iter().filter(|(t, s)| *s >= 0.8 && !taken.contains(t)).collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+        Ok(ranked.into_iter().take(5).map(|(t, _)| t).collect())
+    }
+
+    fn rules(&self, owner: &str) -> Result<Vec<Rule>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare("SELECT id, pattern, tag FROM tag_rules WHERE owner=?1 ORDER BY id")?;
+        let rows = st
+            .query_map([owner], |r| Ok(Rule { id: r.get(0)?, pattern: r.get(1)?, tag: r.get(2)? }))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    fn add_rule(&self, owner: &str, pattern: &str, tag: &str) -> Result<Rule> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM tag_rules WHERE owner=?1", [owner], |r| r.get(0))?;
+        if n >= 200 {
+            return Err(StoreError::Other("too many rules".into()));
+        }
+        conn.execute(
+            "INSERT INTO tag_rules(owner, pattern, tag, created_at) VALUES(?1, ?2, ?3, ?4)",
+            params![owner, pattern, tag, now()],
+        )?;
+        Ok(Rule { id: conn.last_insert_rowid(), pattern: pattern.to_string(), tag: tag.to_string() })
+    }
+
+    fn delete_rule(&self, owner: &str, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("DELETE FROM tag_rules WHERE id=?1 AND owner=?2", params![id, owner])?;
+        if n == 0 { Err(StoreError::NotFound) } else { Ok(()) }
+    }
+
+    fn apply_rules(&self, owner: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let rules = Self::rule_pairs(&conn, owner)?;
+        let mut st = conn.prepare("SELECT id, body FROM notes WHERE owner=?1")?;
+        let notes: Vec<(i64, String)> = st
+            .query_map([owner], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut changed = 0;
+        for (id, body) in notes {
+            let mut before: Vec<String> = Self::load(&conn, owner, id)?.tags;
+            let mut after = Self::tags_for(&rules, &body);
+            before.sort();
+            after.sort();
+            if before != after {
+                Self::set_tags(&conn, owner, id, &body)?;
+                changed += 1;
+            }
+        }
+        Ok(changed)
     }
 
     fn tags(&self, owner: &str) -> Result<Vec<TagCount>> {
@@ -240,5 +412,71 @@ mod tests {
         // clearing
         let c = s.update("me", n.id, &NoteInput { body: "x".into(), remind_at: Some(0), repeat: Some("".into()), ..Default::default() }).unwrap();
         assert!(c.remind_at.is_none() && c.repeat.is_none());
+    }
+
+    #[test]
+    fn todos_toggle_and_kinds() {
+        let s = SqliteStore::open(":memory:").unwrap();
+        let inp = |b: &str| NoteInput { body: b.into(), ..Default::default() };
+        let a = s.create("me", &inp("Groceries #home\n- [ ] milk\n- [x] eggs\n- [ ] bread")).unwrap();
+        s.create("me", &inp("plain note")).unwrap();
+        s.create("other", &inp("- [ ] not mine")).unwrap();
+        assert_eq!(a.kind, "list");
+        let t = s.todos("me").unwrap();
+        assert_eq!(t.iter().map(|i| (i.line, i.text.as_str())).collect::<Vec<_>>(), vec![(1, "milk"), (3, "bread")]);
+        assert_eq!(t[0].source, "Groceries #home");
+        assert_eq!(t[0].tags, vec!["home"]);
+
+        let n = s.toggle_item("me", a.id, 1).unwrap();
+        assert!(n.body.contains("- [x] milk"));
+        assert_eq!(s.todos("me").unwrap().len(), 1);
+        assert!(matches!(s.toggle_item("other", a.id, 1), Err(StoreError::NotFound)));
+        assert!(matches!(s.toggle_item("me", a.id, 0), Err(StoreError::NotFound)));
+    }
+
+    #[test]
+    fn auto_tag_rules() {
+        let s = SqliteStore::open(":memory:").unwrap();
+        let inp = |b: &str| NoteInput { body: b.into(), ..Default::default() };
+        let old = s.create("me", &inp("Review PR-42 before standup")).unwrap();
+        assert!(old.tags.is_empty());
+        s.add_rule("me", "jira, PR-", "work").unwrap();
+        s.add_rule("other", "milk", "private").unwrap();
+
+        // new notes get the rule tag, and explicit tags stay
+        let n = s.create("me", &inp("Fix PR-7 #urgent")).unwrap();
+        assert_eq!(n.tags, vec!["urgent", "work"]);
+        // existing notes are tagged on demand
+        assert_eq!(s.apply_rules("me").unwrap(), 1);
+        assert_eq!(s.get("me", old.id).unwrap().tags, vec!["work"]);
+        assert_eq!(s.apply_rules("me").unwrap(), 0);
+        // owner isolation
+        assert_eq!(s.rules("me").unwrap().len(), 1);
+        assert!(s.create("me", &inp("milk")).unwrap().tags.is_empty());
+        let r = s.rules("me").unwrap();
+        assert!(matches!(s.delete_rule("other", r[0].id), Err(StoreError::NotFound)));
+        s.delete_rule("me", r[0].id).unwrap();
+        assert!(s.rules("me").unwrap().is_empty());
+    }
+
+    #[test]
+    fn tag_suggestions() {
+        let s = SqliteStore::open(":memory:").unwrap();
+        let inp = |b: &str| NoteInput { body: b.into(), ..Default::default() };
+        s.create("me", &inp("Deploy the lambda to staging #aws")).unwrap();
+        s.create("me", &inp("Lambda cold start numbers #aws #perf")).unwrap();
+        s.create("me", &inp("Buy sourdough starter #home")).unwrap();
+        s.create("other", &inp("lambda lambda #secret")).unwrap();
+
+        let sug = s.suggest_tags("me", "investigate lambda timeout").unwrap();
+        assert_eq!(sug.first().map(String::as_str), Some("aws"));
+        assert!(!sug.contains(&"secret".to_string()));
+        // tag name in text counts, but a tag already written is not suggested again
+        assert!(s.suggest_tags("me", "moving the home server").unwrap().contains(&"home".to_string()));
+        assert!(!s.suggest_tags("me", "lambda #aws").unwrap().contains(&"aws".to_string()));
+        // a rule-added tag is not suggested either
+        s.add_rule("me", "lambda", "aws").unwrap();
+        assert!(!s.suggest_tags("me", "lambda").unwrap().contains(&"aws".to_string()));
+        assert!(s.suggest_tags("me", "zzz qqq").unwrap().is_empty());
     }
 }
