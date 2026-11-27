@@ -350,10 +350,14 @@ async fn put_thumb(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>,
 struct MediaQuery {
     /// Serve the small preview when there is one.
     thumb: Option<bool>,
+    /// The attachment's version, from its JSON. Only a URL with the current version may be cached for long.
+    v: Option<String>,
 }
 
 async fn get_media(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Query(q): Query<MediaQuery>) -> Result<Response, ApiError> {
     let o = owner(&s, &h).await?;
+    let if_none_match = h.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let wanted_v = q.v.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
     let (a, bytes, is_thumb) = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
         let a = st.attachment(&o, id)?;
@@ -366,15 +370,26 @@ async fn get_media(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>,
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    let etag = format!("\"{}{}\"", a.v, if is_thumb { "-t" } else { "" });
+    // Long caching only when the URL names the current version; anything else must be checked with the server, so a
+    // reused id can never show an old picture.
+    let cache = if wanted_v.as_deref() == Some(a.v.as_str()) { "private, max-age=31536000, immutable" } else { "private, no-cache" };
+    if if_none_match.as_deref() == Some(etag.as_str()) {
+        let mut r = StatusCode::NOT_MODIFIED.into_response();
+        r.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+        return Ok(r);
+    }
     // The preview may be a different format from the original; detect it from its bytes.
     let mime = if is_thumb { media::sniff(&bytes).unwrap_or("application/octet-stream").to_string() } else { a.mime.clone() };
     let mut resp = bytes.into_response();
     let hd = resp.headers_mut();
+    hd.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
     hd.insert(header::CONTENT_TYPE, HeaderValue::from_str(&mime).unwrap_or(HeaderValue::from_static("application/octet-stream")));
     hd.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     // Even if a file were opened directly in a tab, it could not run script or load anything.
     hd.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"));
-    hd.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=86400"));
+    hd.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     hd.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("inline"));
     hd.insert("cross-origin-resource-policy", HeaderValue::from_static("same-origin"));
     Ok(resp)

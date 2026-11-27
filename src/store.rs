@@ -37,6 +37,9 @@ pub struct Attachment {
     /// Original file name, for display only.
     pub name: Option<String>,
     pub has_thumb: bool,
+    /// Changes whenever the stored file or its preview changes. Clients put it in the media URL so a browser never
+    /// shows a cached picture for an id that has been reused (SQLite reuses the highest id after a delete).
+    pub v: String,
     #[serde(skip)]
     pub blob_key: String,
     #[serde(skip)]

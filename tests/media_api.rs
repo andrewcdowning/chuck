@@ -208,3 +208,48 @@ async fn files_dedupe_per_user_and_are_cleaned_up() {
     assert_eq!(a.call("PUT", &u, Some("alice"), b, true).await.0, StatusCode::OK);
     std::fs::remove_dir_all(&a.media).ok();
 }
+
+#[tokio::test]
+async fn reused_ids_never_serve_a_stale_picture() {
+    let a = app("reuse");
+    let card = a.new_card("alice", "pics", false).await.1["id"].as_i64().unwrap();
+    let first = a.attach("alice", card, jpeg(1), "first.jpg").await.1;
+    let (id1, v1) = (first["id"].as_i64().unwrap(), first["v"].as_str().unwrap().to_string());
+    assert_eq!(v1.len(), 16);
+
+    // the current version may be cached for long, anything else must be revalidated
+    let (s, h, _) = a.call("GET", &format!("/api/media/{id1}?v={v1}"), Some("alice"), vec![], false).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(h["cache-control"].to_str().unwrap().contains("immutable"));
+    let etag = h["etag"].to_str().unwrap().to_string();
+    let (_, h, _) = a.call("GET", &format!("/api/media/{id1}"), Some("alice"), vec![], false).await;
+    assert_eq!(h["cache-control"], "private, no-cache");
+
+    // delete it and upload a different picture: SQLite hands out the same id again
+    let (s, _, _) = a.call("DELETE", &format!("/api/media/{id1}"), Some("alice"), vec![], false).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let second = a.attach("alice", card, jpeg(2), "second.jpg").await.1;
+    let (id2, v2) = (second["id"].as_i64().unwrap(), second["v"].as_str().unwrap().to_string());
+    assert_eq!(id2, id1, "this is the reuse that caused the bug");
+    assert_ne!(v2, v1, "but the version, and so the URL, is new");
+
+    // a browser revalidating the old URL with the old ETag gets the new file, not 304
+    let mut req = axum::http::Request::builder().method("GET").uri(format!("/api/media/{id2}?v={v1}")).header("x-user", "alice").header("if-none-match", &etag);
+    req = req.header("accept", "*/*");
+    let resp = a.router.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["cache-control"], "private, no-cache", "an old version in the URL is never cached for long");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.ends_with(&[0x12, 2, 0xFF, 0xD9]), "the second picture is served");
+
+    // the current ETag gives 304
+    let (_, h, _) = a.call("GET", &format!("/api/media/{id2}?v={v2}"), Some("alice"), vec![], false).await;
+    let req = axum::http::Request::builder().method("GET").uri(format!("/api/media/{id2}?v={v2}")).header("x-user", "alice").header("if-none-match", h["etag"].to_str().unwrap());
+    let resp = a.router.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+
+    // another user with the same id gets 404 even with a valid-looking version
+    let (s, _, _) = a.call("GET", &format!("/api/media/{id2}?v={v2}"), Some("bob"), vec![], false).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    std::fs::remove_dir_all(&a.media).ok();
+}

@@ -471,6 +471,9 @@ async function addToCard(n, files, card) {
   else refresh();
 }
 
+// Every picture URL carries the attachment's version: a new picture never reuses a cached URL.
+const mediaUrl = (a, small) => `/api/media/${a.id}?v=${a.v}` + (small && a.has_thumb ? "&thumb=true" : "");
+
 function lightbox(imgs, start) {
   let i = start;
   const pic = el("img", { alt: "" });
@@ -478,7 +481,7 @@ function lightbox(imgs, start) {
   const box = el("div", { className: "lightbox", role: "dialog", "aria-label": "Image viewer" }, pic, cap);
   const show = k => {
     i = (k + imgs.length) % imgs.length;
-    pic.src = `/api/media/${imgs[i].id}`;
+    pic.src = mediaUrl(imgs[i], false);
     pic.alt = imgs[i].name || "image";
     cap.textContent = (imgs[i].name || "") + (imgs.length > 1 ? `   ${i + 1} / ${imgs.length}` : "");
   };
@@ -499,7 +502,7 @@ function lightbox(imgs, start) {
 function mediaEl(n, compact) {
   const imgs = n.attachments.filter(a => a.mime.startsWith("image/"));
   if (!imgs.length) return null;
-  const src = (a, small) => `/api/media/${a.id}` + (small && a.has_thumb ? "?thumb=true" : "");
+  const src = mediaUrl;
   const pic = (a, small) => el("img", { src: src(a, small), alt: a.name || "image", loading: "lazy", decoding: "async", width: a.width, height: a.height });
   if (imgs.length === 1) {
     const a = imgs[0], img = pic(a, compact || a.width > 1280);
@@ -898,7 +901,7 @@ function edit(card, n, compact) {
     refresh();
   } });
   const mediaEdit = n.attachments.length ? el("div", { className: "media-edit" }, ...n.attachments.map(a => {
-    const tile = el("span", { className: "tile", title: a.name || "" }, el("img", { src: `/api/media/${a.id}` + (a.has_thumb ? "?thumb=true" : ""), alt: a.name || "image" }));
+    const tile = el("span", { className: "tile", title: a.name || "" }, el("img", { src: mediaUrl(a, true), alt: a.name || "image" }));
     tile.append(el("button", { className: "x", type: "button", textContent: "×", title: "Remove from card", onclick: async () => {
       if (!confirm("Remove this image from the card?")) return;
       try { await api("/api/media/" + a.id, { method: "DELETE" }); tile.remove(); } catch (e) { msg.textContent = e.message; }
