@@ -607,6 +607,7 @@ function recorderEl({ onAttach, onClose, autostart }) {
     stream = null; actx = null;
   };
   const cleanup = () => {
+    asking++;   // a permission answer that arrives after this is ignored, and its microphone released at once
     if (rec && rec.state !== "inactive") { rec.onstop = null; try { rec.stop(); } catch {} }
     release();
     if (url) { URL.revokeObjectURL(url); url = null; }
@@ -618,11 +619,26 @@ function recorderEl({ onAttach, onClose, autostart }) {
   const idle = () => box.replaceChildren(btn("● Record", start, true), btn("Close", close));
   const fail = m => { release(); box.replaceChildren(el("span", { className: "err", textContent: m }), btn("Close", close)); };
 
+  let asking = 0;   // id of the current permission request; a Cancel while waiting makes a late answer ignored
   async function start() {
     if (!window.isSecureContext) return fail("Recording needs a secure page (localhost or HTTPS).");
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return fail("This browser can't record audio.");
-    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-    catch (e) { return fail(e.name === "NotAllowedError" ? "Microphone access was blocked. Allow it in the browser's site settings, then try again." : "No microphone was found."); }
+    const mine = ++asking;
+    // The browser may be showing a permission prompt; until it is answered nothing else can happen, so say so.
+    box.replaceChildren(el("span", { className: "hint", textContent: "Waiting for microphone permission. Look for the prompt next to the address bar." }),
+      btn("Cancel", () => { asking++; idle(); say("Recording cancelled."); }));
+    let s;
+    try { s = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) {
+      if (mine !== asking) return;
+      return fail({
+        NotAllowedError: "Microphone access was blocked. Allow it for this site in the browser (the icon next to the address bar). On a Mac, also check System Settings > Privacy & Security > Microphone for your browser.",
+        NotFoundError: "No microphone was found. Connect one and try again.",
+        NotReadableError: "The microphone could not be opened. Another app may be using it, or the system is blocking it.",
+      }[e.name] || `The microphone could not be opened (${e.name}).`);
+    }
+    if (mine !== asking) { s.getTracks().forEach(t => t.stop()); return; }   // cancelled while waiting
+    stream = s;
     liveRecorders.add(box);
     const type = recordingType();
     rec = new MediaRecorder(stream, type ? { mimeType: type } : {});
