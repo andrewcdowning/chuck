@@ -7,6 +7,10 @@
 
 pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_THUMB_BYTES: usize = 2 * 1024 * 1024;
+/// About 25 minutes of Opus voice, or a few minutes of WAV.
+pub const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
+/// Largest upload of any kind (the request body limit).
+pub const MAX_UPLOAD_BYTES: usize = MAX_AUDIO_BYTES;
 const MAX_SIDE: u32 = 20_000;
 const MAX_PIXELS: u64 = 100_000_000;
 
@@ -29,7 +33,7 @@ pub enum MediaError {
 impl std::fmt::Display for MediaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MediaError::Unsupported => write!(f, "unsupported file type: Chuck accepts JPEG, PNG, GIF and WebP images"),
+            MediaError::Unsupported => write!(f, "unsupported file type: Chuck accepts JPEG, PNG, GIF and WebP images and WebM, Ogg, M4A, MP3 and WAV audio"),
             MediaError::Malformed(why) => write!(f, "the file is damaged or not a valid image ({why})"),
             MediaError::TooLarge => write!(f, "the file is too large"),
         }
@@ -233,6 +237,142 @@ fn webp(b: &[u8]) -> R<(u32, u32, Vec<u8>)> {
     Ok((w, h, out))
 }
 
+/// An accepted upload of any kind.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Upload {
+    pub mime: &'static str,
+    pub audio: bool,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// The file with metadata removed where the format allows it.
+    pub bytes: Vec<u8>,
+}
+
+/// Images are checked and cleaned by `check_image`; audio by `check_audio`.
+pub fn check_upload(b: &[u8]) -> R<Upload> {
+    if sniff(b).is_some() {
+        let c = check_image(b, MAX_IMAGE_BYTES)?;
+        return Ok(Upload { mime: c.mime, audio: false, width: Some(c.width), height: Some(c.height), bytes: c.bytes });
+    }
+    let (mime, bytes) = check_audio(b)?;
+    Ok(Upload { mime, audio: true, width: None, height: None, bytes })
+}
+
+/// Detects audio from the bytes. Video containers are accepted only in their audio flavours: WebM (the browser
+/// recorder's format), Ogg, and MP4 with an audio brand.
+pub fn sniff_audio(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        // EBML header; the DocType must say webm (plain Matroska is not accepted).
+        return b[..b.len().min(64)].windows(4).any(|w| w == b"webm").then_some("audio/webm");
+    }
+    if b.starts_with(b"OggS") {
+        return Some("audio/ogg");
+    }
+    if b.len() >= 12 && &b[4..8] == b"ftyp" {
+        let brand = &b[8..12];
+        let audio_brands: [&[u8; 4]; 8] = [b"M4A ", b"M4B ", b"mp42", b"mp41", b"isom", b"iso5", b"iso6", b"dash"];
+        return audio_brands.iter().any(|x| *x == brand).then_some("audio/mp4");
+    }
+    if b.starts_with(b"ID3") || (b.len() >= 2 && b[0] == 0xFF && b[1] & 0xE0 == 0xE0 && b[1] & 0x06 != 0) {
+        return Some("audio/mpeg");
+    }
+    if b.len() >= 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WAVE" {
+        return Some("audio/wav");
+    }
+    None
+}
+
+/// Validates audio and removes tags where that is safe: ID3 tags from MP3, and LIST/INFO, ID3 and other
+/// non-audio chunks from WAV. WebM, Ogg and MP4 are stored as uploaded: their tags sit inside structures that
+/// would need re-muxing to edit. Recordings made in the browser carry no tags.
+pub fn check_audio(b: &[u8]) -> R<(&'static str, Vec<u8>)> {
+    if b.len() > MAX_AUDIO_BYTES {
+        return Err(MediaError::TooLarge);
+    }
+    let mime = sniff_audio(b).ok_or(MediaError::Unsupported)?;
+    let out = match mime {
+        "audio/mpeg" => mp3(b)?,
+        "audio/wav" => wav(b)?,
+        "audio/mp4" => {
+            let size = be32(b, 0)? as usize;
+            if size < 12 || size > b.len() {
+                return Err(MediaError::Malformed("bad ftyp box"));
+            }
+            b.to_vec()
+        }
+        "audio/ogg" => {
+            if b.len() < 27 || b[4] != 0 {
+                return Err(MediaError::Malformed("bad Ogg page"));
+            }
+            b.to_vec()
+        }
+        _ => {
+            if b.len() < 32 {
+                return Err(MediaError::Malformed("truncated"));
+            }
+            b.to_vec()
+        }
+    };
+    Ok((mime, out))
+}
+
+/// MP3: strips leading ID3v2 tags (there can be several) and a trailing ID3v1 tag.
+fn mp3(b: &[u8]) -> R<Vec<u8>> {
+    let mut i = 0;
+    while b[i..].starts_with(b"ID3") {
+        let h = b.get(i..i + 10).ok_or(MediaError::Malformed("truncated tag"))?;
+        if h[6..10].iter().any(|x| x & 0x80 != 0) {
+            return Err(MediaError::Malformed("bad tag size"));
+        }
+        let size = h[6..10].iter().fold(0usize, |acc, x| (acc << 7) | *x as usize);
+        let footer = if h[5] & 0x10 != 0 { 10 } else { 0 };
+        i = i.checked_add(10 + size + footer).filter(|e| *e <= b.len()).ok_or(MediaError::Malformed("bad tag size"))?;
+    }
+    let mut end = b.len();
+    if end >= i + 128 && &b[end - 128..end - 125] == b"TAG" {
+        end -= 128;
+    }
+    let body = &b[i..end];
+    if body.len() < 4 || body[0] != 0xFF || body[1] & 0xE0 != 0xE0 {
+        return Err(MediaError::Malformed("no audio frames"));
+    }
+    Ok(body.to_vec())
+}
+
+/// WAV: keeps the format, data and fact chunks; drops the rest (LIST/INFO text, ID3, broadcast and XMP chunks).
+fn wav(b: &[u8]) -> R<Vec<u8>> {
+    let riff = le32(b, 4)? as usize;
+    if riff < 4 || riff + 8 > b.len() {
+        return Err(MediaError::Malformed("bad RIFF size"));
+    }
+    let body = &b[12..riff + 8];
+    let mut kept: Vec<u8> = Vec::new();
+    let (mut fmt, mut data) = (false, false);
+    let mut i = 0;
+    while i + 8 <= body.len() {
+        let id = &body[i..i + 4];
+        let size = le32(body, i + 4)? as usize;
+        let end = i.checked_add(8 + size).filter(|e| *e <= body.len()).ok_or(MediaError::Malformed("bad chunk size"))?;
+        if matches!(id, b"fmt " | b"data" | b"fact") {
+            fmt |= id == b"fmt ";
+            data |= id == b"data";
+            kept.extend_from_slice(&body[i..end]);
+            if size & 1 == 1 {
+                kept.push(0);
+            }
+        }
+        i = end + (size & 1);
+    }
+    if !fmt || !data {
+        return Err(MediaError::Malformed("missing format or data"));
+    }
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&((4 + kept.len()) as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend(kept);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +500,83 @@ mod tests {
         assert!(check_image(b"RIFF\xff\xff\xff\x7fWEBPVP8X", MAX_IMAGE_BYTES).is_err());
         assert!(check_image(b"GIF89a\x00\x00\x00\x00", MAX_IMAGE_BYTES).is_err(), "zero size");
         assert!(check_image(b"GIF89a\x20\x4e\x20\x4e", MAX_IMAGE_BYTES).is_err(), "too many pixels");
+    }
+
+    fn wav_file(extra: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut body = b"WAVE".to_vec();
+        let mut chunk = |id: &[u8; 4], d: &[u8]| {
+            body.extend_from_slice(id);
+            body.extend_from_slice(&(d.len() as u32).to_le_bytes());
+            body.extend_from_slice(d);
+            if d.len() % 2 == 1 {
+                body.push(0);
+            }
+        };
+        chunk(b"fmt ", &[1, 0, 1, 0, 0x40, 0x1F, 0, 0, 0x80, 0x3E, 0, 0, 2, 0, 16, 0]);
+        for (id, d) in extra {
+            chunk(id, d);
+        }
+        chunk(b"data", &[0u8; 100]);
+        let mut v = b"RIFF".to_vec();
+        v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        v.extend(body);
+        v
+    }
+
+    #[test]
+    fn audio_types_and_tag_stripping() {
+        // WAV: text and ID3 chunks dropped, audio kept, RIFF size fixed
+        let w = wav_file(&[(b"LIST", b"INFOIART\x06\0\0\0Alice\0"), (b"id3 ", b"ID3 secret")]);
+        let u = check_upload(&w).unwrap();
+        assert_eq!((u.mime, u.audio, u.width), ("audio/wav", true, None));
+        let s = String::from_utf8_lossy(&u.bytes);
+        assert!(!s.contains("Alice") && !s.contains("secret") && s.contains("fmt ") && s.contains("data"));
+        assert_eq!(u32::from_le_bytes(u.bytes[4..8].try_into().unwrap()) as usize, u.bytes.len() - 8);
+
+        // MP3: ID3v2 at the front and ID3v1 at the back removed
+        let mut m = b"ID3\x04\x00\x00\x00\x00\x00\x0aTIT2secret".to_vec();
+        m.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x64]);
+        m.extend_from_slice(&[0x55; 200]);
+        let mut v1 = b"TAGsong title".to_vec();
+        v1.resize(128, 0);
+        m.extend(v1);
+        let u = check_upload(&m).unwrap();
+        assert_eq!(u.mime, "audio/mpeg");
+        assert!(u.bytes.starts_with(&[0xFF, 0xFB]) && u.bytes.len() == 204);
+
+        // containers stored as uploaded
+        let mut webm = vec![0x1A, 0x45, 0xDF, 0xA3, 0x9F, 0x42, 0x86, 0x81, 0x01, 0x42, 0x82, 0x84];
+        webm.extend_from_slice(b"webm");
+        webm.extend_from_slice(&[0u8; 40]);
+        assert_eq!(check_upload(&webm).unwrap().mime, "audio/webm");
+        let mut mkv = webm.clone();
+        mkv[12..16].copy_from_slice(b"mkvx");
+        assert_eq!(check_upload(&mkv), Err(MediaError::Unsupported), "plain Matroska is not accepted");
+        let mut ogg = b"OggS\0\x02".to_vec();
+        ogg.extend_from_slice(&[0u8; 40]);
+        assert_eq!(check_upload(&ogg).unwrap().mime, "audio/ogg");
+        let mut m4a = vec![0, 0, 0, 0x20];
+        m4a.extend_from_slice(b"ftypM4A \0\0\0\0M4A mp42isom\0\0\0\0");
+        assert_eq!(check_upload(&m4a).unwrap().mime, "audio/mp4");
+        let mut mov = m4a.clone();
+        mov[8..12].copy_from_slice(b"qt  ");
+        assert_eq!(check_upload(&mov), Err(MediaError::Unsupported), "QuickTime movies are not audio");
+
+        // images still go through the image checks
+        assert_eq!(check_upload(&jpeg_with_metadata()).unwrap().width, Some(640));
+    }
+
+    #[test]
+    fn audio_rejects_bad_input() {
+        assert!(check_upload(b"ID3\x04\x00\x00\x7f\x7f\x7f\x7f").is_err(), "tag larger than the file");
+        assert!(check_upload(b"ID3\x04\x00\x00\x00\x00\x00\x00TEXT ONLY").is_err(), "no audio frames after the tag");
+        let w = wav_file(&[]);
+        assert!(check_upload(&w[..30]).is_err());
+        let mut no_data = wav_file(&[]);
+        let n = no_data.len();
+        no_data[n - 108..n - 104].copy_from_slice(b"junk");
+        assert!(check_upload(&no_data).is_err(), "missing data chunk");
+        assert!(check_upload(b"OggS\x01").is_err());
+        assert_eq!(check_audio(&vec![0xFF; MAX_AUDIO_BYTES + 1]), Err(MediaError::TooLarge));
     }
 }

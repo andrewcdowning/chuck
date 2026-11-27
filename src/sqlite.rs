@@ -96,6 +96,12 @@ impl SqliteStore {
                 conn.execute("UPDATE notes SET open_todos=?1 WHERE id=?2", params![open_items(&body), id])?;
             }
         }
+        // Audio length on attachments.
+        let has: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('attachments') WHERE name='duration_ms'", [], |r| r.get(0))?;
+        if has == 0 {
+            conn.execute_batch("ALTER TABLE attachments ADD COLUMN duration_ms INTEGER;")?;
+        }
         // Manual order: a position per card, highest first within each group. Backfilled from the order cards had
         // before, so nobody's board changes when this arrives.
         let has: i64 = conn.query_row(
@@ -249,7 +255,7 @@ impl SqliteStore {
         Ok(note)
     }
 
-    const ATTACHMENT_COLS: &'static str = "id, note_id, mime, bytes, width, height, name, blob_key, thumb_key";
+    const ATTACHMENT_COLS: &'static str = "id, note_id, mime, bytes, width, height, name, blob_key, thumb_key, duration_ms";
 
     fn attachment_row(r: &rusqlite::Row) -> rusqlite::Result<Attachment> {
         let thumb_key: Option<String> = r.get(8)?;
@@ -263,6 +269,7 @@ impl SqliteStore {
             bytes: r.get(3)?,
             width: r.get(4)?,
             height: r.get(5)?,
+            duration_ms: r.get(9)?,
             name: r.get(6)?,
             has_thumb: thumb_key.is_some(),
             v,
@@ -557,9 +564,9 @@ impl NoteStore for SqliteStore {
             return Err(StoreError::Other("too many attachments on this card".into()));
         }
         conn.execute(
-            "INSERT INTO attachments(owner, note_id, position, blob_key, sha256, mime, bytes, width, height, name, created_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![owner, note_id, next, a.blob_key, a.sha256, a.mime, a.bytes, a.width, a.height, a.name, now()],
+            "INSERT INTO attachments(owner, note_id, position, blob_key, sha256, mime, bytes, width, height, name, created_at, duration_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![owner, note_id, next, a.blob_key, a.sha256, a.mime, a.bytes, a.width, a.height, a.name, now(), a.duration_ms],
         )?;
         let id = conn.last_insert_rowid();
         conn.execute("UPDATE notes SET updated_at=?1 WHERE id=?2 AND owner=?3", params![now(), note_id, owner])?;
@@ -770,6 +777,7 @@ mod tests {
             bytes: 10,
             width: Some(640),
             height: Some(480),
+            duration_ms: None,
             name: Some("a.jpg".into()),
             blob_key: key.into(),
             sha256: "x".into(),
