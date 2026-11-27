@@ -1,10 +1,16 @@
 use crate::store::*;
+use crate::tagging::{feedback_offset, strip_hashtags, Doc, Model, Suggestion};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
+    /// Bumped whenever note text changes; cached tagging models are rebuilt when it moves.
+    generation: AtomicU64,
+    models: Mutex<HashMap<String, (u64, Arc<Model>)>>,
 }
 
 fn now() -> i64 {
@@ -36,7 +42,15 @@ impl SqliteStore {
                pattern TEXT NOT NULL,
                tag TEXT NOT NULL,
                created_at INTEGER NOT NULL);
-             CREATE INDEX IF NOT EXISTS tag_rules_owner ON tag_rules(owner);",
+             CREATE INDEX IF NOT EXISTS tag_rules_owner ON tag_rules(owner);
+             CREATE TABLE IF NOT EXISTS suggestion_events(
+               id INTEGER PRIMARY KEY,
+               owner TEXT NOT NULL,
+               tag TEXT NOT NULL,
+               action TEXT NOT NULL CHECK(action IN ('accepted','dismissed')),
+               confidence REAL NOT NULL,
+               created_at INTEGER NOT NULL);
+             CREATE INDEX IF NOT EXISTS suggestion_events_owner ON suggestion_events(owner, tag);",
         )?;
         // Additive migration for databases created before reminders existed.
         let has: i64 = conn.query_row(
@@ -66,7 +80,40 @@ impl SqliteStore {
                 conn.execute("UPDATE notes SET open_todos=?1 WHERE id=?2", params![open_items(&body), id])?;
             }
         }
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self { conn: Mutex::new(conn), generation: AtomicU64::new(0), models: Mutex::new(HashMap::new()) })
+    }
+
+    /// Notes that carry at least one tag the user wrote, with the hashtags stripped from the text.
+    /// Tags added by auto-tag rules are deliberately not labels.
+    pub fn training_docs(&self, owner: &str) -> Result<Vec<Doc>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare("SELECT body FROM notes WHERE owner=?1")?;
+        let bodies: Vec<String> = st.query_map([owner], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+        Ok(bodies
+            .iter()
+            .map(|b| Doc { labels: extract_tags(b), text: strip_hashtags(b) })
+            .filter(|d| !d.labels.is_empty())
+            .collect())
+    }
+
+    /// Owners with notes in this database, and how many each.
+    pub fn owners(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare("SELECT owner, COUNT(*) FROM notes GROUP BY owner ORDER BY owner")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    fn model(&self, owner: &str) -> Result<Arc<Model>> {
+        let generation = self.generation.load(Ordering::Relaxed);
+        if let Some((g, m)) = self.models.lock().unwrap().get(owner) {
+            if *g == generation {
+                return Ok(m.clone());
+            }
+        }
+        let model = Arc::new(Model::train(&self.training_docs(owner)?));
+        self.models.lock().unwrap().insert(owner.to_string(), (generation, model.clone()));
+        Ok(model)
     }
 
     fn load(conn: &Connection, owner: &str, id: i64) -> Result<Note> {
@@ -151,6 +198,7 @@ impl NoteStore for SqliteStore {
         let id = conn.last_insert_rowid();
         conn.execute("INSERT INTO notes_fts(rowid, body) VALUES(?1, ?2)", params![id, body])?;
         Self::set_tags(&conn, owner, id, body)?;
+        self.generation.fetch_add(1, Ordering::Relaxed);
         Self::load(&conn, owner, id)
     }
 
@@ -182,6 +230,7 @@ impl NoteStore for SqliteStore {
         )?;
         conn.execute("UPDATE notes_fts SET body=?1 WHERE rowid=?2", params![body, id])?;
         Self::set_tags(&conn, owner, id, body)?;
+        self.generation.fetch_add(1, Ordering::Relaxed);
         Self::load(&conn, owner, id)
     }
 
@@ -192,6 +241,7 @@ impl NoteStore for SqliteStore {
             return Err(StoreError::NotFound);
         }
         conn.execute("DELETE FROM notes_fts WHERE rowid=?1", [id])?;
+        self.generation.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -240,63 +290,29 @@ impl NoteStore for SqliteStore {
         Self::load(&conn, owner, id)
     }
 
-    fn suggest_tags(&self, owner: &str, text: &str) -> Result<Vec<String>> {
-        const STOP: [&str; 24] = [
-            "the", "and", "for", "with", "that", "this", "from", "have", "has", "was", "were", "are", "but", "not", "you",
-            "your", "about", "into", "need", "get", "got", "just", "then", "them",
-        ];
+    fn suggest_tags(&self, owner: &str, text: &str) -> Result<Vec<Suggestion>> {
+        let model = self.model(owner)?;
         let conn = self.conn.lock().unwrap();
-        let rules = Self::rule_pairs(&conn, owner)?;
-        // Tags already written or about to be added by a rule are not suggestions.
-        let taken = Self::tags_for(&rules, text);
-
-        let mut words: Vec<String> = Vec::new();
-        for w in text.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
-            if w.chars().count() >= 3 && !STOP.contains(&w) && !words.iter().any(|x| x == w) {
-                words.push(w.to_string());
-            }
-            if words.len() >= 12 {
-                break;
-            }
-        }
-
-        let mut scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-        // 1. The tag's own name appears in the text.
+        // Tags already written, or about to be added by a rule, are not suggestions.
+        let taken = Self::tags_for(&Self::rule_pairs(&conn, owner)?, text);
         let mut st = conn.prepare(
-            "SELECT DISTINCT t.tag FROM note_tags t JOIN notes n ON n.id=t.note_id WHERE n.owner=?1",
+            "SELECT tag, SUM(action='accepted'), SUM(action='dismissed') FROM suggestion_events WHERE owner=?1 GROUP BY tag",
         )?;
-        let existing: Vec<String> = st.query_map([owner], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
-        for tag in &existing {
-            if words.iter().any(|w| w == tag || (w.len() >= 4 && tag.len() >= 4 && (tag.starts_with(w.as_str()) || w.starts_with(tag.as_str())))) {
-                *scores.entry(tag.clone()).or_default() += 1.5;
-            }
-        }
-        // 2. Words that usually appear in notes carrying a tag.
-        for w in &words {
-            let Some(fq) = fts_query(w) else { continue };
-            let df: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM notes n WHERE n.owner=?1 AND n.id IN (SELECT rowid FROM notes_fts WHERE notes_fts MATCH ?2)",
-                params![owner, fq],
-                |r| r.get(0),
-            )?;
-            if df == 0 {
-                continue;
-            }
-            let weight = (df.min(2) as f64) / 2.0; // a word seen in one note only is weak evidence
-            let mut st = conn.prepare(
-                "SELECT t.tag, COUNT(*) FROM note_tags t JOIN notes n ON n.id=t.note_id
-                 WHERE n.owner=?1 AND t.note_id IN (SELECT rowid FROM notes_fts WHERE notes_fts MATCH ?2) GROUP BY t.tag",
-            )?;
-            let rows: Vec<(String, i64)> = st
-                .query_map(params![owner, fq], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<std::result::Result<_, _>>()?;
-            for (tag, cnt) in rows {
-                *scores.entry(tag).or_default() += (cnt as f64 / df as f64) * weight;
-            }
-        }
-        let mut ranked: Vec<(String, f64)> = scores.into_iter().filter(|(t, s)| *s >= 0.8 && !taken.contains(t)).collect();
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
-        Ok(ranked.into_iter().take(5).map(|(t, _)| t).collect())
+        let offsets: HashMap<String, f64> = st
+            .query_map([owner], |r| {
+                Ok((r.get::<_, String>(0)?, feedback_offset(r.get::<_, i64>(1)?.max(0) as u32, r.get::<_, i64>(2)?.max(0) as u32)))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(model.suggest(text, &taken, &offsets))
+    }
+
+    fn record_suggestion_feedback(&self, owner: &str, tag: &str, accepted: bool, confidence: f64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO suggestion_events(owner, tag, action, confidence, created_at) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![owner, tag, if accepted { "accepted" } else { "dismissed" }, confidence.clamp(0.0, 1.0), now()],
+        )?;
+        Ok(())
     }
 
     fn rules(&self, owner: &str) -> Result<Vec<Rule>> {
@@ -466,23 +482,43 @@ mod tests {
     }
 
     #[test]
-    fn tag_suggestions() {
+    fn tag_suggestions_confidence_and_feedback() {
         let s = SqliteStore::open(":memory:").unwrap();
         let inp = |b: &str| NoteInput { body: b.into(), ..Default::default() };
-        s.create("me", &inp("Deploy the lambda to staging #aws")).unwrap();
-        s.create("me", &inp("Lambda cold start numbers #aws #perf")).unwrap();
-        s.create("me", &inp("Buy sourdough starter #home")).unwrap();
-        s.create("other", &inp("lambda lambda #secret")).unwrap();
+        for i in 0..20 {
+            s.create("me", &inp(&format!("Deploy the lambda stack to staging, bucket policy v{i} #aws"))).unwrap();
+            s.create("me", &inp(&format!("Buy milk and garden soil, plumber visit v{i} #home"))).unwrap();
+        }
+        s.create("other", &inp("lambda lambda lambda #secret")).unwrap();
 
-        let sug = s.suggest_tags("me", "investigate lambda timeout").unwrap();
-        assert_eq!(sug.first().map(String::as_str), Some("aws"));
-        assert!(!sug.contains(&"secret".to_string()));
-        // tag name in text counts, but a tag already written is not suggested again
-        assert!(s.suggest_tags("me", "moving the home server").unwrap().contains(&"home".to_string()));
-        assert!(!s.suggest_tags("me", "lambda #aws").unwrap().contains(&"aws".to_string()));
-        // a rule-added tag is not suggested either
+        let sug = s.suggest_tags("me", "investigate lambda deploy timeout").unwrap();
+        assert_eq!(sug[0].tag, "aws");
+        assert!(sug[0].confidence >= 0.7 && sug[0].tier == "high", "{:?}", sug[0]);
+        assert!(!sug[0].why.is_empty());
+        assert!(sug.iter().all(|x| x.tag != "secret"));
+        // written tags and rule-added tags are never suggested
+        assert!(s.suggest_tags("me", "lambda #aws").unwrap().iter().all(|x| x.tag != "aws"));
         s.add_rule("me", "lambda", "aws").unwrap();
-        assert!(!s.suggest_tags("me", "lambda").unwrap().contains(&"aws".to_string()));
+        assert!(s.suggest_tags("me", "lambda").unwrap().iter().all(|x| x.tag != "aws"));
         assert!(s.suggest_tags("me", "zzz qqq").unwrap().is_empty());
+
+        // dismissals lower a tag's confidence
+        let s2 = SqliteStore::open(":memory:").unwrap();
+        for i in 0..20 {
+            s2.create("me", &inp(&format!("Deploy the lambda stack to staging, bucket policy v{i} #aws"))).unwrap();
+            s2.create("me", &inp(&format!("Buy milk and garden soil, plumber visit v{i} #home"))).unwrap();
+        }
+        let before = s2.suggest_tags("me", "lambda bucket").unwrap()[0].confidence;
+        for _ in 0..6 {
+            s2.record_suggestion_feedback("me", "aws", false, 0.9).unwrap();
+        }
+        let after = s2.suggest_tags("me", "lambda bucket").unwrap().iter().find(|x| x.tag == "aws").map_or(0.0, |x| x.confidence);
+        assert!(after < before, "{after} !< {before}");
+
+        // the cached model follows edits: a brand new tag becomes suggestable once notes use it
+        for i in 0..4 {
+            s2.create("me", &inp(&format!("Sourdough starter feeding schedule {i} #baking"))).unwrap();
+        }
+        assert!(s2.suggest_tags("me", "feed the sourdough starter").unwrap().iter().any(|x| x.tag == "baking"));
     }
 }
