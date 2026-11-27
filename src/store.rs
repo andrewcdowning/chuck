@@ -34,6 +34,8 @@ pub struct Attachment {
     pub bytes: i64,
     pub width: Option<i64>,
     pub height: Option<i64>,
+    /// Audio length, as measured by the uploading browser (display only).
+    pub duration_ms: Option<i64>,
     /// Original file name, for display only.
     pub name: Option<String>,
     pub has_thumb: bool,
@@ -51,6 +53,7 @@ pub struct NewAttachment {
     pub bytes: i64,
     pub width: Option<i64>,
     pub height: Option<i64>,
+    pub duration_ms: Option<i64>,
     pub name: Option<String>,
     pub blob_key: String,
     pub sha256: String,

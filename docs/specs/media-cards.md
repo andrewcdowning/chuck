@@ -6,8 +6,17 @@ D4 other files rejected; D5 video later.
 
 Phase 1 as built: the server accepts JPEG, PNG, GIF and WebP, detected from the bytes, and strips metadata itself (EXIF, XMP,
 IPTC, comments, PNG text chunks, WebP EXIF/XMP chunks) whatever the client did. The browser converts AVIF and HEIC before
-upload. GIFs are stored as uploaded so animation survives. Not yet built: alt text editing, upload cancel, audio, SVG,
-video, zip export.
+upload. GIFs are stored as uploaded so animation survives.
+
+Phase 2 (audio) built: WebM, Ogg, MP4/M4A, MP3 and WAV, detected from the bytes (plain Matroska and QuickTime are
+refused). The server strips ID3 tags from MP3 and text/ID3 chunks from WAV; WebM, Ogg and MP4 are stored as uploaded
+because their tags sit inside structures that would need re-muxing (browser recordings carry none). The browser measures
+the length (recordings often do not state it) and the server stores it as display-only. Media is served with byte ranges
+(Safari needs them to play audio at all). Recorder: composer Record button, #voice, and Record on any card; up to 10
+minutes; the microphone is released on stop, cancel, or when the board redraws. Player: play/pause, seek, time, speed
+(1x, 1.5x, 2x), one clip at a time.
+
+Not yet built: alt text editing, upload cancel, SVG, video, zip export, transcription.
 
 ## Goal
 

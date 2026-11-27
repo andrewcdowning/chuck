@@ -193,6 +193,24 @@
   .note.picked { outline: 3px solid var(--tx); outline-offset: 3px; }
   body.moving-card, body.moving-card * { cursor: grabbing !important; user-select: none; }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  /* Audio: minimal player and recorder */
+  .audio { margin: 0 0 8px; }
+  .aname { font: 500 11px var(--mono); color: var(--mu); margin: 0 0 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .player { display: flex; align-items: center; gap: 8px; border: var(--bw) solid var(--edge); border-radius: 999px; padding: 4px 10px 4px 4px; background: var(--field); }
+  .player .play { width: 30px; height: 30px; flex: none; border: 0; border-radius: 999px; background: var(--on-bg); color: var(--on-tx); font: 12px/1 var(--ui); cursor: pointer; }
+  .player .seek { flex: 1; min-width: 60px; width: auto; padding: 0; border: 0; border-radius: 0; background: transparent; accent-color: var(--tx); }
+  .player .time { font: 500 11px var(--mono); white-space: nowrap; }
+  .player .speed { border: 0; background: transparent; color: var(--tx); font: 600 11px var(--mono); padding: 2px 4px; cursor: pointer; }
+  .player audio { display: none; }
+  .recorder { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; padding: 8px; border: var(--bw) dashed var(--edge); border-radius: 12px; }
+  .recorder .player { flex: 1 1 240px; }
+  .recorder .row { margin: 0; }
+  .recdot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; animation: recpulse 1s infinite; }
+  @keyframes recpulse { 50% { opacity: .25; } }
+  @media (prefers-reduced-motion: reduce) { .recdot { animation: none; } }
+  .meter { width: 120px; height: 8px; border-radius: 999px; border: var(--bw) solid var(--edge); overflow: hidden; }
+  .meter i { display: block; height: 100%; width: 0; background: var(--tx); }
+  .tray .tile.audio, .media-edit .tile.audio { display: grid; place-items: center; font: 600 12px var(--mono); color: var(--tx); }
 </style>
 </head>
 <body>
@@ -354,13 +372,18 @@ function whenFields(note) {
    Photos are redrawn on a canvas before upload: that applies the camera's rotation, caps the size, makes a small
    preview, and drops all metadata (GPS location included). The server strips metadata again and checks every file.
    GIFs are kept as they are so animation survives. */
-const MEDIA_ACCEPT = "image/jpeg,image/png,image/gif,image/webp,image/avif,image/heic,image/heif,.heic,.heif";
+const MEDIA_ACCEPT = "image/jpeg,image/png,image/gif,image/webp,image/avif,image/heic,image/heif,.heic,.heif," +
+  "audio/webm,audio/ogg,audio/mp4,audio/x-m4a,audio/mpeg,audio/wav,audio/x-wav,.m4a,.mp3,.ogg,.oga,.opus,.wav,.weba";
 const MAX_SIDE = 2560, THUMB_SIDE = 640;
 let pendingMedia = [];   // images attached in the composer, waiting for Save: { name, status, prepared, url, error }
 let picker;              // the hidden file input behind "Attach" and #photo
+let composerRecorder = null;   // the composer's recorder panel; kept across type switches so a recording survives
 
 const isHeic = f => /image\/hei[cf]/i.test(f.type) || /\.hei[cf]$/i.test(f.name);
 const looksLikeImage = f => /^image\//.test(f.type) || /\.(jpe?g|png|gif|webp|avif|hei[cf])$/i.test(f.name);
+const looksLikeAudio = f => /^audio\//.test(f.type) || /\.(m4a|mp3|ogg|oga|opus|wav|weba)$/i.test(f.name);
+const looksLikeMedia = f => looksLikeImage(f) || looksLikeAudio(f);
+const fmtDur = ms => { const t = Math.max(0, Math.round((ms || 0) / 1000)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
 const hasFiles = e => !!e.dataTransfer && [...e.dataTransfer.types].includes("Files");
 // Encoding never waits forever: some browsers stall instead of failing on a format they cannot write.
 const canvasBlob = (c, type, q) => Promise.race([
@@ -393,7 +416,7 @@ async function encodeImage(bitmap, maxSide, type) {
 }
 
 async function prepareImage(file) {
-  if (!looksLikeImage(file)) throw new Error(`${file.name}: not an image. Chuck accepts JPEG, PNG, GIF, WebP, AVIF and HEIC.`);
+  if (!looksLikeImage(file)) throw new Error(`${file.name}: not a picture or audio file. Chuck accepts JPEG, PNG, GIF, WebP, AVIF, HEIC, and WebM, Ogg, M4A, MP3 and WAV audio.`);
   if (file.size > 60 * 1024 * 1024) throw new Error(`${file.name}: larger than 60 MB.`);
   let bitmap;
   try { bitmap = await decodeImage(file); }
@@ -426,8 +449,33 @@ function sendBlob(method, url, blob, onProgress) {
   });
 }
 
+// Audio is uploaded as it is (the server checks and cleans it); its length is measured here, because files
+// recorded in a browser often do not state their own duration.
+function audioDuration(blob) {
+  return new Promise(res => {
+    const a = new Audio(), url = URL.createObjectURL(blob);
+    let done = false;
+    const fin = v => { if (done) return; done = true; URL.revokeObjectURL(url); res(Number.isFinite(v) && v > 0 ? Math.round(v * 1000) : null); };
+    a.preload = "metadata";
+    a.onloadedmetadata = () => {
+      if (a.duration === Infinity) { a.ondurationchange = () => { if (Number.isFinite(a.duration)) fin(a.duration); }; a.currentTime = 1e101; }
+      else fin(a.duration);
+    };
+    a.onerror = () => fin(null);
+    setTimeout(() => fin(null), 8000);
+    a.src = url;
+  });
+}
+
+async function prepareMedia(file) {
+  if (!looksLikeAudio(file) || looksLikeImage(file)) return prepareImage(file);
+  if (file.size > 25 * 1024 * 1024) throw new Error(`${file.name}: audio larger than 25 MB.`);
+  return { full: file, thumb: null, name: file.name, audio: true, duration_ms: await audioDuration(file) };
+}
+
 async function uploadImage(noteId, p, onProgress) {
-  const a = await sendBlob("POST", `/api/notes/${noteId}/attachments?name=${encodeURIComponent(p.name)}`, p.full, onProgress);
+  const dur = p.duration_ms ? `&duration_ms=${p.duration_ms}` : "";
+  const a = await sendBlob("POST", `/api/notes/${noteId}/attachments?name=${encodeURIComponent(p.name)}${dur}`, p.full, onProgress);
   // Without a preview the card simply shows the full image, so a failed preview is not an error.
   if (p.thumb) await sendBlob("PUT", `/api/media/${a.id}/thumb`, p.thumb).catch(() => {});
   return a;
@@ -437,8 +485,8 @@ function addPending(files) {
   for (const f of files) {
     const item = { name: f.name, status: "preparing" };
     pendingMedia.push(item);
-    prepareImage(f)
-      .then(p => { item.prepared = p; item.url = URL.createObjectURL(p.thumb || p.full); item.status = "ready"; })
+    prepareMedia(f)
+      .then(p => { item.prepared = p; item.audio = !!p.audio; item.url = p.audio ? null : URL.createObjectURL(p.thumb || p.full); item.status = "ready"; })
       .catch(e => { item.status = "error"; item.error = e.message; })
       .finally(renderTray);
   }
@@ -457,8 +505,9 @@ function renderTray() {
   tray.replaceChildren(...pendingMedia.map(it => {
     const x = el("button", { className: "x", type: "button", textContent: "×", title: "Remove", onclick: () => dropPending(it) });
     if (it.status === "error") return el("div", { className: "tile error", textContent: it.error }, x);
-    const tile = el("div", { className: "tile", title: it.name });
+    const tile = el("div", { className: "tile" + (it.audio ? " audio" : ""), title: it.name });
     if (it.url) tile.append(el("img", { src: it.url, alt: it.name }));
+    if (it.audio) tile.append("♪ " + fmtDur(it.prepared?.duration_ms));
     if (it.status !== "ready") tile.append(el("span", { className: "st", textContent: it.status }));
     tile.append(x);
     return tile;
@@ -473,7 +522,7 @@ async function addToCard(n, files, card) {
   let done = 0;
   for (const f of files) {
     try {
-      const p = await prepareImage(f);
+      const p = await prepareMedia(f);
       await uploadImage(n.id, p, frac => { note.textContent = `Adding ${done + 1} of ${files.length}: ${Math.round(frac * 100)}%`; });
       done++;
     } catch (e) { errors.push(e.message); }
@@ -508,9 +557,138 @@ function lightbox(imgs, start) {
   show(i);
 }
 
+/* ---------- audio ----------
+   A minimal player over a hidden <audio>: play/pause, a seek bar, elapsed and total time, and speed. Only one
+   clip plays at a time. The recorder records with whatever format the browser can make, shows a timer and a level
+   meter, and lets the take be played back before it is attached. The microphone is released as soon as recording
+   stops, is cancelled, or its card is redrawn. */
+let nowPlaying = null;
+function audioPlayer(src, durationMs) {
+  const audio = el("audio", { preload: "metadata", src });
+  const btn = el("button", { className: "play", type: "button", textContent: "▶", "aria-label": "Play" });
+  const bar = el("input", { type: "range", min: 0, max: 1000, value: 0, step: 1, className: "seek", "aria-label": "Position" });
+  const time = el("span", { className: "time" });
+  const speed = el("button", { className: "speed", type: "button", textContent: "1×", title: "Playback speed" });
+  let seeking = false;
+  const total = () => (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration * 1000 : durationMs || 0);
+  const show = () => {
+    time.textContent = `${fmtDur(audio.currentTime * 1000)} / ${fmtDur(total())}`;
+    if (!seeking) bar.value = total() ? Math.min(1000, Math.round(audio.currentTime * 1e6 / total())) : 0;
+  };
+  btn.onclick = () => { audio.paused ? audio.play().catch(() => {}) : audio.pause(); };
+  audio.onplay = () => {
+    if (nowPlaying && nowPlaying !== audio) nowPlaying.pause();
+    nowPlaying = audio;
+    btn.textContent = "❚❚"; btn.setAttribute("aria-label", "Pause");
+  };
+  audio.onpause = audio.onended = () => { btn.textContent = "▶"; btn.setAttribute("aria-label", "Play"); };
+  audio.ontimeupdate = audio.onloadedmetadata = audio.ondurationchange = show;
+  bar.oninput = () => { seeking = true; time.textContent = `${fmtDur(bar.value / 1000 * total())} / ${fmtDur(total())}`; };
+  bar.onchange = () => { audio.currentTime = bar.value / 1000 * total() / 1000; seeking = false; show(); };
+  const rates = [1, 1.5, 2];
+  speed.onclick = () => { const r = rates[(rates.indexOf(audio.playbackRate) + 1) % rates.length]; audio.playbackRate = r; speed.textContent = r + "×"; };
+  show();
+  return el("div", { className: "player" }, btn, bar, time, speed, audio);
+}
+
+const MAX_RECORDING_MS = 10 * 60 * 1000;
+const liveRecorders = new Set();
+function recordingType() {
+  for (const t of ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4", "audio/webm"]) if (window.MediaRecorder?.isTypeSupported?.(t)) return t;
+  return "";
+}
+function recorderEl({ onAttach, onClose, autostart }) {
+  const box = el("div", { className: "recorder" });
+  let stream, rec, chunks, started, timer, raf, actx, blob, durMs, url;
+  const release = () => {
+    clearInterval(timer); cancelAnimationFrame(raf);
+    stream?.getTracks().forEach(t => t.stop());
+    actx?.close?.().catch?.(() => {});
+    stream = null; actx = null;
+  };
+  const cleanup = () => {
+    if (rec && rec.state !== "inactive") { rec.onstop = null; try { rec.stop(); } catch {} }
+    release();
+    if (url) { URL.revokeObjectURL(url); url = null; }
+    liveRecorders.delete(box);
+  };
+  box.cleanup = cleanup;
+  const btn = (text, onclick, primary) => el("button", { className: "btn sm" + (primary ? " primary" : ""), type: "button", textContent: text, onclick });
+  const close = () => { cleanup(); box.remove(); onClose?.(); };
+  const idle = () => box.replaceChildren(btn("● Record", start, true), btn("Close", close));
+  const fail = m => { release(); box.replaceChildren(el("span", { className: "err", textContent: m }), btn("Close", close)); };
+
+  async function start() {
+    if (!window.isSecureContext) return fail("Recording needs a secure page (localhost or HTTPS).");
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return fail("This browser can't record audio.");
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { return fail(e.name === "NotAllowedError" ? "Microphone access was blocked. Allow it in the browser's site settings, then try again." : "No microphone was found."); }
+    liveRecorders.add(box);
+    const type = recordingType();
+    rec = new MediaRecorder(stream, type ? { mimeType: type } : {});
+    chunks = [];
+    rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    rec.onstop = () => { durMs = Date.now() - started; release(); blob = new Blob(chunks, { type: rec.mimeType || type || "audio/webm" }); review(); };
+    rec.start(1000);
+    started = Date.now();
+    const clock = el("span", { className: "time", textContent: "0:00" });
+    const meter = el("span", { className: "meter", title: "Input level" }, el("i"));
+    try {
+      actx = new AudioContext();
+      const an = actx.createAnalyser();
+      an.fftSize = 512;
+      actx.createMediaStreamSource(stream).connect(an);
+      const buf = new Uint8Array(an.fftSize);
+      const loop = () => {
+        an.getByteTimeDomainData(buf);
+        let peak = 0;
+        for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+        meter.firstChild.style.width = Math.min(100, peak / 128 * 160) + "%";
+        raf = requestAnimationFrame(loop);
+      };
+      loop();
+    } catch {}
+    timer = setInterval(() => {
+      const ms = Date.now() - started;
+      clock.textContent = fmtDur(ms);
+      if (ms >= MAX_RECORDING_MS && rec.state === "recording") rec.stop();
+    }, 250);
+    box.replaceChildren(el("span", { className: "recdot", "aria-hidden": "true" }), clock, meter,
+      btn("■ Stop", () => { if (rec.state !== "inactive") rec.stop(); }, true),
+      btn("Cancel", () => { cleanup(); idle(); say("Recording cancelled."); }));
+    say("Recording. Press Stop when you are done.");
+  }
+
+  function review() {
+    if (url) URL.revokeObjectURL(url);
+    url = URL.createObjectURL(blob);
+    const ext = /ogg/.test(blob.type) ? "ogg" : /mp4/.test(blob.type) ? "m4a" : "webm";
+    const when = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" }).replace(/[/:]/g, "-");
+    const name = `Voice note ${when}.${ext}`;
+    box.replaceChildren(audioPlayer(url, durMs), el("div", { className: "row" },
+      btn("Attach", () => { const p = { full: blob, thumb: null, name, audio: true, duration_ms: durMs }; cleanup(); idle(); onAttach(p); }, true),
+      btn("Record again", start),
+      btn("Discard", () => { cleanup(); idle(); say("Recording discarded."); })));
+    say("Recording stopped. Play it back, then attach or discard it.");
+  }
+
+  idle();
+  if (autostart) start();
+  return box;
+}
+
 // Pictures in a card: one image keeps its proportions (space reserved before it loads, never upscaled, height
 // capped); two sit side by side; three or more form a grid, with "+N" when there are more than four.
 function mediaEl(n, compact) {
+  const pics = imageEl(n, compact);
+  const clips = n.attachments.filter(a => a.mime.startsWith("audio/")).map(a => el("div", { className: "audio" },
+    ...(a.name && !/^Voice note /.test(a.name) ? [el("div", { className: "aname", textContent: a.name, title: a.name })] : []),
+    audioPlayer(mediaUrl(a, false), a.duration_ms)));
+  if (!pics && !clips.length) return null;
+  return el("div", { className: "media-all" }, ...(pics ? [pics] : []), ...clips);
+}
+
+function imageEl(n, compact) {
   const imgs = n.attachments.filter(a => a.mime.startsWith("image/"));
   if (!imgs.length) return null;
   const src = mediaUrl;
@@ -544,7 +722,7 @@ function setupMedia() {
     addPending([...e.dataTransfer.files]);
   });
   comp.addEventListener("paste", e => {
-    const files = [...(e.clipboardData?.files || [])].filter(looksLikeImage);
+    const files = [...(e.clipboardData?.files || [])].filter(looksLikeMedia);
     if (files.length) { e.preventDefault(); addPending(files); }
   });
   // Show every drop target while files are dragged over the page; never let the browser open a dropped file.
@@ -607,6 +785,18 @@ function switchType(type, text) {
   if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); }
 }
 
+function openComposerRecorder(autostart) {
+  if (!composerRecorder) {
+    composerRecorder = recorderEl({
+      onAttach: p => { pendingMedia.push({ name: p.name, status: "ready", prepared: p, audio: true }); renderTray(); },
+      onClose: () => { composerRecorder = null; },
+      autostart,
+    });
+    $("tray").before(composerRecorder);
+  }
+  composerRecorder.querySelector("button")?.focus();
+}
+
 function renderComposer(carry = {}) {
   const box = $("composer");
   const msg = el("div", { className: "err" });
@@ -622,7 +812,7 @@ function renderComposer(carry = {}) {
   } else {
     ta = el("textarea", { value: carry.text || "", placeholder: mode === "reminder"
       ? "e.g. remind me at 3pm to call Bob, or every Monday at 8am standup. Or pick a time below."
-      : "Capture something. Use #tags. #todo or #reminder changes the card type, #photo attaches images. Drop or paste images here. Ctrl/Cmd+Enter to save." });
+      : "Capture something. Use #tags. #todo or #reminder changes the card type, #photo attaches pictures, #voice records. Drop or paste files here. Ctrl/Cmd+Enter to save." });
     fields = [ta];
     kids = [ta];
     if (mode === "reminder") {
@@ -633,6 +823,10 @@ function renderComposer(carry = {}) {
   }
   attachSuggest(fields, fields[0], sugg);
   fields.forEach(f => f.addEventListener("input", () => {
+    if (/(^|\s)#voice(?=\s)/i.test(f.value)) {
+      f.value = f.value.replace(/(^|\s)#voice\s/i, "$1");
+      openComposerRecorder(true);
+    }
     if (/(^|\s)#photo(?=\s)/i.test(f.value)) {
       f.value = f.value.replace(/(^|\s)#photo\s/i, "$1");
       picker.click();
@@ -656,6 +850,7 @@ function renderComposer(carry = {}) {
     } else {
       body = ta.value.trim();
       if (!body && !pendingMedia.some(x => x.status === "ready")) return;
+      if (composerRecorder && composerRecorder.querySelector(".recdot")) { msg.textContent = "Stop the recording first."; return; }
     }
     if (pendingMedia.some(x => x.status === "preparing")) { msg.textContent = "Still preparing images…"; return; }
     if (mode === "reminder") {
@@ -684,9 +879,10 @@ function renderComposer(carry = {}) {
     refresh();
   };
   fields.forEach(f => f.addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) save(); }));
-  const attach = el("button", { className: "btn", type: "button", textContent: "Attach", title: "Attach images (or drop or paste them here)", onclick: () => picker.click() });
-  box.replaceChildren(...kids, el("div", { className: "tray", id: "tray" }), sugg,
-    el("div", { className: "row" }, el("button", { className: "btn primary", textContent: "Save", onclick: save }), attach, msg));
+  const attach = el("button", { className: "btn", type: "button", textContent: "Attach", title: "Attach pictures or audio (or drop or paste them here)", onclick: () => picker.click() });
+  const record = el("button", { className: "btn", type: "button", textContent: "Record", title: "Record a voice note (or type #voice)", onclick: () => openComposerRecorder(false) });
+  box.replaceChildren(...kids, ...(composerRecorder ? [composerRecorder] : []), el("div", { className: "tray", id: "tray" }), sugg,
+    el("div", { className: "row" }, el("button", { className: "btn primary", textContent: "Save", onclick: save }), attach, record, msg));
   renderTray();
 }
 
@@ -846,6 +1042,16 @@ function noteEl(n, compact) {
   card.dataset.group = stats && stats.total > stats.done ? "pin" : "rest";
   const created = new Date(n.created_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   const acts = el("div", { className: "acts" },
+    el("button", { textContent: "Record", title: "Record a voice note on this card", onclick: () => {
+      if (card.querySelector(".recorder")) return;
+      card.querySelector(".content").prepend(recorderEl({
+        onAttach: async p => {
+          try { await uploadImage(n.id, p); } catch (e) { alert("Couldn't attach the recording: " + e.message); }
+          refresh();
+        },
+        autostart: true,
+      }));
+    } }),
     el("button", { textContent: "Edit", onclick: () => edit(card, n, compact) }),
     el("button", { textContent: "Delete", onclick: async () => {
       if (confirm("Delete this note?")) { await api("/api/notes/" + n.id, { method: "DELETE" }); refresh(); }
@@ -924,9 +1130,11 @@ function edit(card, n, compact) {
     refresh();
   } });
   const mediaEdit = n.attachments.length ? el("div", { className: "media-edit" }, ...n.attachments.map(a => {
-    const tile = el("span", { className: "tile", title: a.name || "" }, el("img", { src: mediaUrl(a, true), alt: a.name || "image" }));
+    const isAudio = a.mime.startsWith("audio/");
+    const tile = el("span", { className: "tile" + (isAudio ? " audio" : ""), title: a.name || "" },
+      isAudio ? "♪ " + fmtDur(a.duration_ms) : el("img", { src: mediaUrl(a, true), alt: a.name || "image" }));
     tile.append(el("button", { className: "x", type: "button", textContent: "×", title: "Remove from card", onclick: async () => {
-      if (!confirm("Remove this image from the card?")) return;
+      if (!confirm(isAudio ? "Remove this recording from the card?" : "Remove this image from the card?")) return;
       try { await api("/api/media/" + a.id, { method: "DELETE" }); tile.remove(); } catch (e) { msg.textContent = e.message; }
     } }));
     return tile;
@@ -1169,7 +1377,11 @@ async function loadFeed(reset) {
   if (filter === "@reminders") extra.reminders = "true"; else if (filter) extra.tag = filter;
   const notes = await api("/api/notes?" + params(extra));
   if (mine !== feedSeq) return;
-  if (reset) { offset = 0; $("out").replaceChildren(); }
+  if (reset) {
+    liveRecorders.forEach(r => { if (r !== composerRecorder) r.cleanup(); });
+    offset = 0;
+    $("out").replaceChildren();
+  }
   $("out").className = board ? "grid " + boardLayout : "";
   notes.forEach(n => $("out").append(cardEl(n, board)));
   offset += notes.length;

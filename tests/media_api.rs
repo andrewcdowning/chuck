@@ -151,8 +151,12 @@ async fn rejects_what_is_not_an_allowed_image() {
     assert_eq!(a.attach("alice", id, svg, "x.jpg").await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE, "type comes from bytes, not the name");
     assert_eq!(a.attach("alice", id, b"%PDF-1.7".to_vec(), "a.pdf").await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
     assert_eq!(a.attach("alice", id, jpeg(1)[..40].to_vec(), "cut.jpg").await.0, StatusCode::BAD_REQUEST);
-    let big = vec![0u8; chuck::media::MAX_IMAGE_BYTES + 4096];
-    assert_eq!(a.attach("alice", id, big, "big.jpg").await.0, StatusCode::PAYLOAD_TOO_LARGE);
+    // a JPEG over the 20 MB image limit, and any body over the 25 MB upload limit
+    let mut big_jpeg = jpeg(1);
+    big_jpeg.resize(chuck::media::MAX_IMAGE_BYTES + 4096, 0);
+    assert_eq!(a.attach("alice", id, big_jpeg, "big.jpg").await.0, StatusCode::PAYLOAD_TOO_LARGE);
+    let huge = vec![0u8; chuck::media::MAX_UPLOAD_BYTES + 4096];
+    assert_eq!(a.attach("alice", id, huge, "huge.bin").await.0, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(a.attach("alice", 999_999, jpeg(1), "x.jpg").await.0, StatusCode::NOT_FOUND);
     assert_eq!(a.files(), 0, "nothing rejected is stored");
 }

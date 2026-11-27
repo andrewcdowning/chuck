@@ -38,7 +38,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/rules/:id", delete(delete_rule))
         .route(
             "/api/notes/:id/attachments",
-            post(add_attachment).layer(DefaultBodyLimit::max(media::MAX_IMAGE_BYTES + 1024)),
+            post(add_attachment).layer(DefaultBodyLimit::max(media::MAX_UPLOAD_BYTES + 1024)),
         )
         .route("/api/media/:id", get(get_media).delete(delete_media))
         .route("/api/media/:id/thumb", put(put_thumb).layer(DefaultBodyLimit::max(media::MAX_THUMB_BYTES + 1024)))
@@ -292,6 +292,8 @@ fn clean_name(n: Option<String>) -> Option<String> {
 #[derive(Deserialize)]
 struct AttachQuery {
     name: Option<String>,
+    /// Audio length measured by the browser. Display only; must be between 0 and 6 hours.
+    duration_ms: Option<i64>,
 }
 
 /// Body: the raw file. The type is detected from the bytes; metadata is stripped before storing.
@@ -302,14 +304,20 @@ async fn add_attachment(State(s): State<AppState>, h: HeaderMap, Path(note_id): 
     let res = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
         // Fail early, before any work, if the card is not this user's.
         st.get(&o, note_id)?;
-        let c = media::check_image(&body, media::MAX_IMAGE_BYTES)?;
+        let c = media::check_upload(&body)?;
+        let duration_ms = match q.duration_ms {
+            Some(_) if !c.audio => None, // ignored for images
+            Some(d) if !(0..=6 * 3600 * 1000).contains(&d) => return Err(ApiError(StatusCode::BAD_REQUEST, "invalid duration".into())),
+            d => d,
+        };
         let key = blob::key_for(&o, &c.bytes);
         blobs.put(&key, &c.bytes).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("storing file: {e}")))?;
         let new = NewAttachment {
             mime: c.mime.to_string(),
             bytes: c.bytes.len() as i64,
-            width: Some(c.width as i64),
-            height: Some(c.height as i64),
+            width: c.width.map(|w| w as i64),
+            height: c.height.map(|h| h as i64),
+            duration_ms,
             name,
             sha256: blob::sha256_hex(&c.bytes),
             blob_key: key.clone(),
@@ -384,8 +392,26 @@ async fn get_media(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>,
     }
     // The preview may be a different format from the original; detect it from its bytes.
     let mime = if is_thumb { media::sniff(&bytes).unwrap_or("application/octet-stream").to_string() } else { a.mime.clone() };
-    let mut resp = bytes.into_response();
+    // Byte ranges: Safari will not play audio without them, and every browser needs them to seek. A range only
+    // applies to the version the client already has (If-Range); otherwise the whole file is sent.
+    let total = bytes.len();
+    let if_range_ok = h.get(header::IF_RANGE).and_then(|v| v.to_str().ok()).map_or(true, |v| v == etag);
+    let range = h.get(header::RANGE).and_then(|v| v.to_str().ok()).filter(|_| if_range_ok).map(|r| parse_range(r, total));
+    let (status, body, content_range) = match range {
+        None => (StatusCode::OK, bytes, None),
+        Some(Some((start, end))) => (StatusCode::PARTIAL_CONTENT, bytes[start..=end].to_vec(), Some(format!("bytes {start}-{end}/{total}"))),
+        Some(None) => {
+            let mut r = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            r.headers_mut().insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes */{total}")).unwrap());
+            return Ok(r);
+        }
+    };
+    let mut resp = (status, body).into_response();
     let hd = resp.headers_mut();
+    hd.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Some(cr) = content_range {
+        hd.insert(header::CONTENT_RANGE, HeaderValue::from_str(&cr).unwrap());
+    }
     hd.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
     hd.insert(header::CONTENT_TYPE, HeaderValue::from_str(&mime).unwrap_or(HeaderValue::from_static("application/octet-stream")));
     hd.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
@@ -421,4 +447,46 @@ async fn move_note(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>,
     let o = owner(&s, &h).await?;
     let st = s.store.clone();
     Ok(Json(blocking(move || st.move_note(&o, id, b.prev, b.next)).await?))
+}
+
+/// One byte range from a Range header: `bytes=a-b`, `bytes=a-` or `bytes=-n`. Several ranges are answered with the
+/// first one only, which browsers handle. Returns None when the range cannot be satisfied.
+fn parse_range(h: &str, total: usize) -> Option<(usize, usize)> {
+    let spec = h.trim().strip_prefix("bytes=")?.split(',').next()?.trim();
+    let (a, b) = spec.split_once('-')?;
+    if total == 0 {
+        return None;
+    }
+    let (start, end) = if a.is_empty() {
+        let n: usize = b.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        (total.saturating_sub(n), total - 1)
+    } else {
+        let start: usize = a.parse().ok()?;
+        let end = if b.is_empty() { total - 1 } else { b.parse::<usize>().ok()?.min(total - 1) };
+        (start, end)
+    };
+    (start <= end && start < total).then_some((start, end))
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::parse_range;
+
+    #[test]
+    fn ranges() {
+        assert_eq!(parse_range("bytes=0-99", 1000), Some((0, 99)));
+        assert_eq!(parse_range("bytes=500-", 1000), Some((500, 999)));
+        assert_eq!(parse_range("bytes=-100", 1000), Some((900, 999)));
+        assert_eq!(parse_range("bytes=900-5000", 1000), Some((900, 999)), "end past the file is clamped");
+        assert_eq!(parse_range("bytes=0-0,5-9", 1000), Some((0, 0)), "first of several");
+        assert_eq!(parse_range("bytes=1000-", 1000), None);
+        assert_eq!(parse_range("bytes=5-1", 1000), None);
+        assert_eq!(parse_range("bytes=-0", 1000), None);
+        assert_eq!(parse_range("items=0-1", 1000), None);
+        assert_eq!(parse_range("bytes=x-", 1000), None);
+        assert_eq!(parse_range("bytes=-5000", 1000), Some((0, 999)));
+    }
 }
