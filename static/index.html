@@ -137,6 +137,15 @@
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; align-items: start; }
   .grid .note { margin: 0; }
   .grid .empty { grid-column: 1 / -1; }
+  /* Board layouts. Rows: every card in a row is as tall as the tallest, so rows line up as bands.
+     Columns: cards pack under each other with no gaps; each card spans as many 2px grid rows as it is tall
+     (set by the packer below), so reading order still runs left to right. */
+  .grid.rows { align-items: stretch; }
+  .grid.rows > .note { display: flex; flex-direction: column; }
+  .grid.rows > .note > .content { flex: 1; }
+  .grid.cols { grid-auto-rows: 2px; row-gap: 0; }
+  .grid.cols > .note { margin-bottom: 14px; }
+  #layouts[hidden] { display: none; }
   .note.compact .head { font-size: 10px; letter-spacing: .06em; flex-wrap: wrap; row-gap: 2px; }
   .note .head > span:first-child { white-space: nowrap; flex: none; }
   .row .label { margin-right: 2px; }
@@ -194,7 +203,10 @@
   </aside>
   <main>
     <div class="bar">
-      <div class="seg" id="views" role="group" aria-label="View"><button data-v="feed">Feed</button><button data-v="board">Board</button></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <div class="seg" id="views" role="group" aria-label="View"><button data-v="feed">Feed</button><button data-v="board">Board</button></div>
+        <div class="seg" id="layouts" role="group" aria-label="Board layout"><button data-l="cols" title="Pack cards into columns with no gaps">Columns</button><button data-l="rows" title="Line cards up in rows of equal height">Rows</button></div>
+      </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <button class="btn sm" id="notify" hidden>Enable alerts</button>
         <a class="btn sm" id="export" href="/api/export" download style="text-decoration:none">Export .md</a>
@@ -221,6 +233,7 @@ const $ = id => document.getElementById(id);
 const PAGE = 50;
 let filter = "";            // "" | tag name | "@reminders"
 let view = new URLSearchParams(location.search).get("view") || localStorage.getItem("chuck-view") || "feed";
+let boardLayout = new URLSearchParams(location.search).get("layout") || localStorage.getItem("chuck-layout") || "cols";
 let mode = "note";
 let offset = 0;
 
@@ -521,17 +534,25 @@ function setupMedia() {
     if (files.length) { e.preventDefault(); addPending(files); }
   });
   // Show every drop target while files are dragged over the page; never let the browser open a dropped file.
-  let depth = 0;
-  window.addEventListener("dragenter", e => { if (hasFiles(e)) { depth++; document.body.classList.add("dragging-files"); } });
-  window.addEventListener("dragleave", e => { if (hasFiles(e) && --depth <= 0) { depth = 0; document.body.classList.remove("dragging-files"); } });
-  window.addEventListener("dragover", e => { if (hasFiles(e)) e.preventDefault(); });
-  window.addEventListener("drop", e => {
-    if (!hasFiles(e)) return;
-    e.preventDefault();
-    depth = 0;
+  // Browsers fire dragover continuously while a drag is over the page, but they do not reliably say when a drag
+  // leaves the window or is cancelled (Firefox in particular). So the outlines stay on only while dragover keeps
+  // arriving, and clear themselves shortly after it stops.
+  let dragTimer;
+  const endDrag = () => {
+    clearTimeout(dragTimer);
     document.body.classList.remove("dragging-files");
     document.querySelectorAll(".drop-on").forEach(x => x.classList.remove("drop-on"));
+  };
+  window.addEventListener("dragover", e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    document.body.classList.add("dragging-files");
+    clearTimeout(dragTimer);
+    dragTimer = setTimeout(endDrag, 300);
   });
+  window.addEventListener("drop", e => { if (hasFiles(e)) e.preventDefault(); endDrag(); });
+  window.addEventListener("dragend", endDrag);
+  window.addEventListener("blur", endDrag);
 }
 
 /* ---------- due date field (todo cards) ---------- */
@@ -848,7 +869,7 @@ function noteEl(n, compact) {
   }
   card.append(head, content);
   // Each card is a drop target: dropped images are added to it.
-  card.addEventListener("dragover", e => { if (hasFiles(e)) { e.preventDefault(); e.stopPropagation(); card.classList.add("drop-on"); } });
+  card.addEventListener("dragover", e => { if (hasFiles(e)) { e.preventDefault(); card.classList.add("drop-on"); } });
   card.addEventListener("dragleave", e => { if (!card.contains(e.relatedTarget)) card.classList.remove("drop-on"); });
   card.addEventListener("drop", e => {
     if (!hasFiles(e)) return;
@@ -975,10 +996,38 @@ function params(extra = {}) {
   return p;
 }
 
+/* Column packing: each card's grid span follows its real height. A ResizeObserver keeps it right as images load,
+   cards are edited or items ticked; a MutationObserver picks up cards added or replaced anywhere in the board. */
+const PACK_ROW = 2, PACK_GAP = 14;
+function packCard(card) {
+  if (!card.parentElement || !card.parentElement.classList.contains("cols")) { card.style.gridRowEnd = ""; return; }
+  const h = card.getBoundingClientRect().height;
+  card.style.gridRowEnd = `span ${Math.max(1, Math.ceil((h + PACK_GAP) / PACK_ROW))}`;
+}
+const packer = new ResizeObserver(entries => entries.forEach(e => packCard(e.target)));
+// Cards are re-packed as soon as they change, without waiting for a frame: when added or replaced, when anything
+// inside them changes (editing, a new checklist item, "Show more"), and when an image in them finishes loading.
+// The ResizeObserver above is the backstop for anything else (for example resizing a text box by hand).
+const boardEl = document.getElementById("out");
+new MutationObserver(muts => {
+  const touched = new Set();
+  for (const m of muts) {
+    if (m.target === boardEl) {
+      m.addedNodes.forEach(n => { if (n.classList?.contains("note")) { touched.add(n); packer.observe(n); } });
+      m.removedNodes.forEach(n => { if (n.classList?.contains("note")) packer.unobserve(n); });
+    } else {
+      const card = m.target.closest?.("#out > .note") || m.target.parentElement?.closest("#out > .note");
+      if (card) touched.add(card);
+    }
+  }
+  touched.forEach(packCard);
+}).observe(boardEl, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+boardEl.addEventListener("load", e => { if (e.target.tagName === "IMG") { const c = e.target.closest("#out > .note"); if (c) packCard(c); } }, true);
+
 async function loadFeed(reset) {
   const board = view === "board";
   if (reset) { offset = 0; $("out").replaceChildren(); }
-  $("out").className = board ? "grid" : "";
+  $("out").className = board ? "grid " + boardLayout : "";
   const extra = { limit: PAGE, offset };
   if (filter === "@reminders") extra.reminders = "true"; else if (filter) extra.tag = filter;
   const notes = await api("/api/notes?" + params(extra));
@@ -1049,12 +1098,24 @@ function setupNotify() {
 /* ---------- chrome: themes, views, modes ---------- */
 function mark(groupId, attr, val) { document.querySelectorAll(`#${groupId} button`).forEach(b => b.classList.toggle("on", b.dataset[attr] === val)); }
 function setTheme(t) { document.documentElement.dataset.theme = t; localStorage.setItem("chuck-theme", t); mark("themes", "t", t); }
-function setView(v) { view = v; localStorage.setItem("chuck-view", v); mark("views", "v", v); refresh(); }
+function setView(v) { view = v; localStorage.setItem("chuck-view", v); mark("views", "v", v); $("layouts").hidden = v !== "board"; refresh(); }
+function setLayout(l) {
+  boardLayout = l;
+  localStorage.setItem("chuck-layout", l);
+  mark("layouts", "l", l);
+  // Switching only changes the board's class; the packer re-measures every card.
+  if (view === "board") {
+    $("out").className = "grid " + l;
+    document.querySelectorAll("#out > .note").forEach(packCard);
+  }
+}
 function setMode(m) { switchType(m, composerText()); }
 document.querySelectorAll("#themes button").forEach(b => b.onclick = () => setTheme(b.dataset.t));
 document.querySelectorAll("#views button").forEach(b => b.onclick = () => setView(b.dataset.v));
 document.querySelectorAll("#modes button").forEach(b => b.onclick = () => setMode(b.dataset.m));
 setTheme(document.documentElement.dataset.theme); mark("views", "v", view); mark("modes", "m", mode);
+mark("layouts", "l", boardLayout); $("layouts").hidden = view !== "board";
+document.querySelectorAll("#layouts button").forEach(b => b.onclick = () => setLayout(b.dataset.l));
 
 let timer;
 ["q", "from", "to"].forEach(id => $(id).addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(refresh, 200); }));
