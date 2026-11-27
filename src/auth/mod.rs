@@ -20,10 +20,23 @@ use std::sync::Arc;
 
 pub use simple::{ct_eq, LocalUser, StaticToken, TrustedHeader};
 
+/// Who a request is from: the owner id, plus a display name when the identity provider has one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Identity {
+    pub id: String,
+    pub name: Option<String>,
+}
+
 pub trait Authenticator: Send + Sync + 'static {
     /// Returns the owner id for the request, or None to reject with 401.
     /// May block briefly (e.g. fetching signing keys); the API calls it on a blocking thread.
     fn authenticate(&self, headers: &HeaderMap) -> Option<String>;
+
+    /// Like `authenticate`, with a display name if the provider knows one. Providers that only implement
+    /// `authenticate` need not override this.
+    fn identity(&self, headers: &HeaderMap) -> Option<Identity> {
+        self.authenticate(headers).map(|id| Identity { id, name: None })
+    }
 }
 
 /// Tries each provider in order.
@@ -33,6 +46,18 @@ impl Authenticator for Chain {
     fn authenticate(&self, headers: &HeaderMap) -> Option<String> {
         self.0.iter().find_map(|a| a.authenticate(headers))
     }
+    fn identity(&self, headers: &HeaderMap) -> Option<Identity> {
+        self.0.iter().find_map(|a| a.identity(headers))
+    }
+}
+
+/// Display names come from outside too. Keep them short and printable; they are shown, never trusted.
+pub fn sanitize_name(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.is_empty() || s.chars().count() > 80 || s.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    Some(s.to_string())
 }
 
 /// Owner ids come from outside (headers, token claims). Keep them short, printable and non-empty.

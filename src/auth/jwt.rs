@@ -5,7 +5,7 @@
 //! Only asymmetric algorithms are accepted, and at least one of issuer, audience or signer must be pinned so a
 //! token minted by the same identity provider for a different application is not accepted.
 
-use super::{env, sanitize_owner, Authenticator};
+use super::{env, sanitize_name, sanitize_owner, Authenticator, Identity};
 use axum::http::{HeaderMap, HeaderName};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
@@ -32,6 +32,8 @@ fn valid_kid(kid: &str) -> bool {
 pub struct JwtAuth {
     header: HeaderName,
     claim: String,
+    /// Claim holding a display name (`CHUCK_JWT_NAME_CLAIM`, default `name`); optional in the token.
+    name_claim: String,
     /// One per allowed algorithm: jsonwebtoken requires every algorithm in a `Validation` to share the key's family.
     validations: Vec<Validation>,
     keys: Box<dyn KeySource>,
@@ -40,8 +42,8 @@ pub struct JwtAuth {
 }
 
 impl JwtAuth {
-    fn new(header: HeaderName, claim: String, validations: Vec<Validation>, keys: Box<dyn KeySource>, signer: Option<String>) -> Self {
-        Self { header, claim, validations, keys, signer }
+    fn new(header: HeaderName, claim: String, name_claim: String, validations: Vec<Validation>, keys: Box<dyn KeySource>, signer: Option<String>) -> Self {
+        Self { header, claim, name_claim, validations, keys, signer }
     }
 
     pub fn from_env() -> Result<Self, String> {
@@ -92,7 +94,8 @@ impl JwtAuth {
             }
             _ => return Err("CHUCK_AUTH=jwt needs exactly one of CHUCK_JWT_JWKS_URL or CHUCK_JWT_KEY_URL".into()),
         };
-        Ok(Self::new(header, claim, validations, keys, signer))
+        let name_claim = env("CHUCK_JWT_NAME_CLAIM").unwrap_or_else(|| "name".into());
+        Ok(Self::new(header, claim, name_claim, validations, keys, signer))
     }
 }
 
@@ -102,6 +105,10 @@ fn https(url: &str, var: &str) -> Result<String, String> {
 
 impl Authenticator for JwtAuth {
     fn authenticate(&self, headers: &HeaderMap) -> Option<String> {
+        self.identity(headers).map(|i| i.id)
+    }
+
+    fn identity(&self, headers: &HeaderMap) -> Option<Identity> {
         let raw = headers.get(&self.header)?.to_str().ok()?;
         let raw = raw.strip_prefix("Bearer ").unwrap_or(raw);
         // ALB emits base64 segments with `=` padding, which JWT libraries reject. Padding carries no data.
@@ -119,7 +126,9 @@ impl Authenticator for JwtAuth {
         }
         let key = self.keys.key(kid)?;
         let data = decode::<serde_json::Value>(&token, &key, validation).ok()?;
-        sanitize_owner(data.claims.get(&self.claim)?.as_str()?)
+        let id = sanitize_owner(data.claims.get(&self.claim)?.as_str()?)?;
+        let name = data.claims.get(&self.name_claim).and_then(|v| v.as_str()).and_then(sanitize_name);
+        Some(Identity { id, name })
     }
 }
 
@@ -213,7 +222,7 @@ mod tests {
             Some(a) => v.set_audience(&[a]),
             None => v.validate_aud = false,
         }
-        JwtAuth::new("authorization".parse().unwrap(), "sub".into(), vec![v], Box::new(Static), None)
+        JwtAuth::new("authorization".parse().unwrap(), "sub".into(), "name".into(), vec![v], Box::new(Static), None)
     }
 
     fn now() -> u64 {
@@ -236,6 +245,17 @@ mod tests {
     fn accepts_valid_token() {
         let t = token("k1", json!({"sub":"alice","iss":"https://idp","exp":now()+300}));
         assert_eq!(auth("https://idp", None).authenticate(&req(&t)).as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn display_name_from_claim() {
+        let a = auth("https://idp", None);
+        let t = token("k1", json!({"sub":"alice","name":"Alice Example","iss":"https://idp","exp":now()+300}));
+        assert_eq!(a.identity(&req(&t)), Some(Identity { id: "alice".into(), name: Some("Alice Example".into()) }));
+        let t = token("k1", json!({"sub":"alice","name":42,"iss":"https://idp","exp":now()+300}));
+        assert_eq!(a.identity(&req(&t)).unwrap().name, None, "a non-text name is ignored");
+        let t = token("k1", json!({"sub":"alice","iss":"https://idp","exp":now()+300}));
+        assert_eq!(a.identity(&req(&t)).unwrap().name, None);
     }
 
     #[test]

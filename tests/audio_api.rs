@@ -23,11 +23,7 @@ struct App {
 fn app(name: &str) -> App {
     let media = std::env::temp_dir().join(format!("chuck-audio-test-{name}-{}", std::process::id()));
     std::fs::remove_dir_all(&media).ok();
-    let state = api::AppState {
-        store: Arc::new(SqliteStore::open(":memory:").unwrap()),
-        auth: Arc::new(HeaderUser),
-        blobs: Arc::new(FsBlobStore::open(&media).unwrap()),
-    };
+    let state = api::AppState::new(Arc::new(SqliteStore::open(":memory:").unwrap()), Arc::new(HeaderUser), Arc::new(FsBlobStore::open(&media).unwrap()));
     App { router: api::router(state), media }
 }
 

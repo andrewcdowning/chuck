@@ -23,6 +23,8 @@ Everything is a card with a `kind`: `note`, `todo` (a card with `- [ ]` items, s
 - **Auto-tag rules:** "if a note contains `jira` or `PR-`, add `#work`". Applied on save, and to existing notes on demand. See the sidebar panel.
 - **Export:** the **Export .md** button downloads one Markdown file, oldest first, with tags, due dates and reminders as metadata. It follows the active tag, search and date filters. API: `GET /api/export` (same filter parameters as `/api/notes`; paging is ignored).
 
+- **Accounts:** every signed-in user id gets a separate account; nobody can read another's cards, files or rules, administrators included. List administrators in `CHUCK_ADMINS` (the `local` user is one when auth is local-only). The sidebar **Account** panel exports your data as a ZIP (notes as JSON and Markdown, rules, feedback, original files, up to 1 GB), deletes your account, and, for administrators, lists accounts (counts and sizes only) with Disable, Enable and Delete. See [docs/AUTH.md](docs/AUTH.md) and [docs/specs/multi-user.md](docs/specs/multi-user.md).
+
 ## Extension points
 
 - `store::NoteStore`: storage trait. Add Postgres/DynamoDB by implementing it and choosing it in `main.rs`.

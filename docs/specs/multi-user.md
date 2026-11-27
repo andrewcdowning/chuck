@@ -1,6 +1,6 @@
 # Spec: multiple users
 
-Status: draft for review. Nothing here is built yet.
+Status: phase 1 built (decisions U1 and U2 taken as recommended; S2 `_` prefix chosen for phase 3). Phases 2 and 3 are not built; the `share_tags` column belongs to phase 3 and does not exist yet. Sections below describe the full design.
 
 ## Goal
 
@@ -113,6 +113,6 @@ do not help on a user's own notes, their weight drops.
 
 ## Phases
 
-1. `users` table, provisioning, disable and delete, per-user export, and the isolation test suite.
+1. (built) `users` table, provisioning, disable and delete, per-user export, and the isolation test suite.
 2. Quotas (needed once media cards land) and the admin screen.
 3. Shared tag data: aggregation job, protections, suggestion signals, `eval-tags --shared`.

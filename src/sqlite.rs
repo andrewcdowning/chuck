@@ -102,6 +102,21 @@ impl SqliteStore {
         if has == 0 {
             conn.execute_batch("ALTER TABLE attachments ADD COLUMN duration_ms INTEGER;")?;
         }
+        // Accounts. Existing databases get a row for every owner that already has data.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS users(
+               id TEXT PRIMARY KEY,
+               display_name TEXT,
+               role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),
+               status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
+               created_at INTEGER NOT NULL,
+               last_seen_at INTEGER);",
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO users(id, created_at)
+             SELECT owner, ?1 FROM (SELECT owner FROM notes UNION SELECT owner FROM tag_rules UNION SELECT owner FROM suggestion_events)",
+            [now()],
+        )?;
         // Manual order: a position per card, highest first within each group. Backfilled from the order cards had
         // before, so nobody's board changes when this arrives.
         let has: i64 = conn.query_row(
@@ -434,6 +449,13 @@ impl NoteStore for SqliteStore {
     }
 
     fn move_note(&self, owner: &str, id: i64, prev: Option<i64>, next: Option<i64>) -> Result<Note> {
+        {
+            let conn = self.conn.lock().unwrap();
+            let own: Option<i64> = conn.query_row("SELECT id FROM notes WHERE id=?1 AND owner=?2", params![id, owner], |r| r.get(0)).optional()?;
+            if own.is_none() {
+                return Err(StoreError::NotFound);
+            }
+        }
         if prev.is_none() && next.is_none() {
             return Err(StoreError::Invalid("give the card above or below the new place".into()));
         }
@@ -590,6 +612,102 @@ impl NoteStore for SqliteStore {
         let a = Self::load_attachment(&conn, owner, id)?;
         conn.execute("DELETE FROM attachments WHERE id=?1 AND owner=?2", params![id, owner])?;
         Ok(a)
+    }
+
+    fn touch_user(&self, id: &str, display_name: Option<&str>, admin: bool) -> Result<User> {
+        let conn = self.conn.lock().unwrap();
+        let t = now();
+        let role = if admin { "admin" } else { "user" };
+        let cur = conn
+            .query_row("SELECT display_name, role, status, created_at, last_seen_at FROM users WHERE id=?1", [id], |r| {
+                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<i64>>(4)?))
+            })
+            .optional()?;
+        let Some((name, cur_role, status, created_at, seen)) = cur else {
+            conn.execute(
+                "INSERT INTO users(id, display_name, role, status, created_at, last_seen_at) VALUES(?1, ?2, ?3, 'active', ?4, ?4)",
+                params![id, display_name, role, t],
+            )?;
+            return Ok(User { id: id.into(), display_name: display_name.map(String::from), role: role.into(), status: "active".into(), created_at: t, last_seen_at: Some(t) });
+        };
+        let new_name = display_name.map(String::from).or(name.clone());
+        let active = status == "active";
+        let stale = seen.map_or(true, |s| t - s >= 300);
+        let last_seen = if active && stale { Some(t) } else { seen };
+        if cur_role != role || new_name != name || last_seen != seen {
+            conn.execute("UPDATE users SET display_name=?1, role=?2, last_seen_at=?3 WHERE id=?4", params![new_name, role, last_seen, id])?;
+        }
+        Ok(User { id: id.into(), display_name: new_name, role: role.into(), status, created_at, last_seen_at: last_seen })
+    }
+
+    fn list_users(&self) -> Result<Vec<UserSummary>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare(
+            "SELECT u.id, u.display_name, u.role, u.status, u.created_at, u.last_seen_at,
+                    (SELECT COUNT(*) FROM notes n WHERE n.owner = u.id),
+                    (SELECT COUNT(*) FROM attachments a WHERE a.owner = u.id),
+                    (SELECT COALESCE(SUM(a.bytes), 0) FROM attachments a WHERE a.owner = u.id)
+             FROM users u ORDER BY u.created_at, u.id",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok(UserSummary {
+                    user: User { id: r.get(0)?, display_name: r.get(1)?, role: r.get(2)?, status: r.get(3)?, created_at: r.get(4)?, last_seen_at: r.get(5)? },
+                    notes: r.get(6)?,
+                    attachments: r.get(7)?,
+                    storage_bytes: r.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    fn set_user_active(&self, id: &str, active: bool) -> Result<User> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("UPDATE users SET status=?1 WHERE id=?2", params![if active { "active" } else { "disabled" }, id])?;
+        if n == 0 {
+            return Err(StoreError::NotFound);
+        }
+        conn.query_row("SELECT id, display_name, role, status, created_at, last_seen_at FROM users WHERE id=?1", [id], |r| {
+            Ok(User { id: r.get(0)?, display_name: r.get(1)?, role: r.get(2)?, status: r.get(3)?, created_at: r.get(4)?, last_seen_at: r.get(5)? })
+        })
+        .map_err(Into::into)
+    }
+
+    fn delete_user(&self, id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let exists: i64 = conn.query_row("SELECT COUNT(*) FROM users WHERE id=?1", [id], |r| r.get(0))?;
+        if exists == 0 {
+            return Err(StoreError::NotFound);
+        }
+        let keys: Vec<String> = {
+            let mut st = conn.prepare("SELECT blob_key, thumb_key FROM attachments WHERE owner=?1")?;
+            let rows: Vec<(String, Option<String>)> = st.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+            let mut keys: Vec<String> = rows.into_iter().flat_map(|(a, b)| std::iter::once(a).chain(b)).collect();
+            keys.sort();
+            keys.dedup();
+            keys
+        };
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM notes_fts WHERE rowid IN (SELECT id FROM notes WHERE owner=?1)", [id])?;
+        tx.execute("DELETE FROM notes WHERE owner=?1", [id])?; // tags and attachments follow by foreign key
+        tx.execute("DELETE FROM attachments WHERE owner=?1", [id])?;
+        tx.execute("DELETE FROM tag_rules WHERE owner=?1", [id])?;
+        tx.execute("DELETE FROM suggestion_events WHERE owner=?1", [id])?;
+        tx.execute("DELETE FROM users WHERE id=?1", [id])?;
+        tx.commit()?;
+        self.models.lock().unwrap().remove(id);
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        Ok(keys)
+    }
+
+    fn feedback_events(&self, owner: &str) -> Result<Vec<FeedbackEvent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare("SELECT tag, action, confidence, created_at FROM suggestion_events WHERE owner=?1 ORDER BY id")?;
+        let rows = st
+            .query_map([owner], |r| Ok(FeedbackEvent { tag: r.get(0)?, action: r.get(1)?, confidence: r.get(2)?, created_at: r.get(3)? }))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
     }
 
     fn blob_referenced(&self, owner: &str, key: &str) -> Result<bool> {
@@ -906,6 +1024,75 @@ mod tests {
         let after: Vec<i64> = s.list("me", &NoteQuery::default()).unwrap().into_iter().map(|n| n.id).collect();
         assert_eq!(after, before);
         assert_eq!(s.list("you", &NoteQuery::default()).unwrap().len(), 1);
+        drop(s);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn user_lifecycle() {
+        let s = SqliteStore::open(":memory:").unwrap();
+        // first sight creates the account; later calls keep it, update the name, follow the admin list
+        let u = s.touch_user("alice", None, false).unwrap();
+        assert_eq!((u.role.as_str(), u.status.as_str(), u.display_name.clone()), ("user", "active", None));
+        assert!(u.last_seen_at.is_some());
+        let u = s.touch_user("alice", Some("Alice A"), true).unwrap();
+        assert_eq!((u.role.as_str(), u.display_name.as_deref()), ("admin", Some("Alice A")));
+        let u = s.touch_user("alice", None, false).unwrap();
+        assert_eq!((u.role.as_str(), u.display_name.as_deref()), ("user", Some("Alice A")), "role follows config; a missing name keeps the old one");
+        s.touch_user("bob", None, false).unwrap();
+        assert_eq!(s.list_users().unwrap().iter().map(|u| u.user.id.as_str()).collect::<Vec<_>>(), vec!["alice", "bob"]);
+
+        // disabling is visible on the next touch and does not count as activity
+        assert_eq!(s.set_user_active("bob", false).unwrap().status, "disabled");
+        assert_eq!(s.touch_user("bob", None, false).unwrap().status, "disabled");
+        assert_eq!(s.set_user_active("bob", true).unwrap().status, "active");
+        assert!(matches!(s.set_user_active("nobody", false), Err(StoreError::NotFound)));
+
+        // everything an account owns goes with it, and nothing of anyone else's
+        let inp = |b: &str| NoteInput { body: b.into(), ..Default::default() };
+        let mine = s.create("alice", &inp("ALICEWORD plan #secret")).unwrap();
+        s.create("bob", &inp("BOBWORD plan #other")).unwrap();
+        s.add_rule("alice", "ALICEWORD", "secret").unwrap();
+        s.record_suggestion_feedback("alice", "secret", true, 0.9).unwrap();
+        let new = |k: &str| NewAttachment { mime: "image/jpeg".into(), bytes: 100, width: Some(1), height: Some(1), duration_ms: None, name: None, blob_key: k.into(), sha256: "x".into() };
+        let a = s.add_attachment("alice", mine.id, &new("alice/f1")).unwrap();
+        s.set_attachment_thumb("alice", a.id, "alice/t1").unwrap();
+        s.add_attachment("bob", s.list("bob", &NoteQuery::default()).unwrap()[0].id, &new("bob/f1")).unwrap();
+        let summary = s.list_users().unwrap();
+        let alice = summary.iter().find(|u| u.user.id == "alice").unwrap();
+        assert_eq!((alice.notes, alice.attachments, alice.storage_bytes), (1, 1, 100));
+
+        let keys = s.delete_user("alice").unwrap();
+        assert_eq!(keys, vec!["alice/f1".to_string(), "alice/t1".to_string()]);
+        assert!(s.list("alice", &NoteQuery { q: Some("ALICEWORD".into()), ..Default::default() }).unwrap().is_empty(), "search index cleaned");
+        assert!(s.tags("alice").unwrap().is_empty() && s.rules("alice").unwrap().is_empty() && s.feedback_events("alice").unwrap().is_empty());
+        assert!(matches!(s.attachment("alice", a.id), Err(StoreError::NotFound)));
+        assert_eq!(s.list_users().unwrap().len(), 1);
+        assert_eq!(s.list("bob", &NoteQuery::default()).unwrap().len(), 1, "bob untouched");
+        assert!(s.blob_referenced("bob", "bob/f1").unwrap());
+        assert!(matches!(s.delete_user("alice"), Err(StoreError::NotFound)));
+        // signing in again starts a fresh account
+        assert_eq!(s.touch_user("alice", None, false).unwrap().status, "active");
+        assert!(s.list("alice", &NoteQuery::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn existing_databases_get_user_rows() {
+        let path = std::env::temp_dir().join(format!("chuck-users-migrate-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let p = path.to_str().unwrap();
+        {
+            let s = SqliteStore::open(p).unwrap();
+            s.create("local", &NoteInput { body: "old note".into(), ..Default::default() }).unwrap();
+            s.add_rule("rules-only", "x", "y").unwrap();
+        }
+        {
+            let c = Connection::open(p).unwrap();
+            c.execute_batch("DROP TABLE users;").unwrap(); // a database from before accounts existed
+        }
+        let s = SqliteStore::open(p).unwrap();
+        let ids: Vec<String> = s.list_users().unwrap().into_iter().map(|u| u.user.id).collect();
+        assert_eq!(ids, vec!["local".to_string(), "rules-only".to_string()]);
         drop(s);
         let _ = std::fs::remove_file(&path);
     }

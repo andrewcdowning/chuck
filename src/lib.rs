@@ -10,6 +10,7 @@ pub mod media;
 pub mod sqlite;
 pub mod store;
 pub mod tagging;
+pub mod zip;
 
 use std::sync::Arc;
 
@@ -22,6 +23,9 @@ pub struct Options {
     pub blobs: Option<Arc<dyn blob::BlobStore>>,
     /// Folder for attachments; defaults to `<database name>-media` beside the database.
     pub media_dir: Option<String>,
+    /// Administrators: owner ids allowed to manage accounts (`CHUCK_ADMINS`, comma separated). In local mode the one
+    /// local user is always an administrator.
+    pub admins: Vec<String>,
     pub providers: auth::Providers,
 }
 
@@ -35,6 +39,7 @@ impl Options {
             store: None,
             blobs: None,
             media_dir: std::env::var("CHUCK_MEDIA_DIR").ok().filter(|v| !v.is_empty()),
+            admins: std::env::var("CHUCK_ADMINS").unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
             providers: auth::Providers::default(),
         }
     }
@@ -51,6 +56,11 @@ impl Options {
 
     pub fn with_store(mut self, store: Arc<dyn store::NoteStore>) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    pub fn with_admins(mut self, admins: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.admins = admins.into_iter().map(Into::into).collect();
         self
     }
 
@@ -85,7 +95,14 @@ pub async fn run(opts: Options) -> Result<(), String> {
         }
     }
 
-    let app = api::router(api::AppState { store, auth: cfg.auth, blobs });
+    let mut admins: std::collections::HashSet<String> = opts.admins.into_iter().collect();
+    if cfg.is_local_only {
+        admins.insert("local".into());
+    }
+    if admins.is_empty() {
+        eprintln!("note: no administrators configured (CHUCK_ADMINS); nobody can manage accounts");
+    }
+    let app = api::router(api::AppState { store, auth: cfg.auth, blobs, admins: Arc::new(admins) });
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("bind {addr}: {e}"))?;
     println!("chuck listening on http://{addr} (auth: {})", cfg.names.join(","));
     axum::serve(listener, app).await.map_err(|e| e.to_string())
