@@ -106,6 +106,8 @@ pub struct RuleInput {
 #[derive(Debug)]
 pub enum StoreError {
     NotFound,
+    /// The request does not make sense (for example moving a card across the open-todo group).
+    Invalid(String),
     Other(String),
 }
 
@@ -126,6 +128,10 @@ pub trait NoteStore: Send + Sync + 'static {
     fn list(&self, owner: &str, q: &NoteQuery) -> Result<Vec<Note>>;
     fn tags(&self, owner: &str) -> Result<Vec<TagCount>>;
     fn get(&self, owner: &str, id: i64) -> Result<Note>;
+    /// Moves a card to sit between two neighbours as the user sees them: `prev` directly above it, `next` directly
+    /// below. One of them may be None (top or bottom). Open todo cards stay in their own group above the rest, so
+    /// neighbours must be in the card's group.
+    fn move_note(&self, owner: &str, id: i64, prev: Option<i64>, next: Option<i64>) -> Result<Note>;
     /// Tags the user already has that fit `text`, best first, each with a calibrated confidence. Local, no external calls.
     /// The set also says how many tagged notes the model learned from, so an empty result can be explained.
     fn suggest_tags(&self, owner: &str, text: &str) -> Result<SuggestionSet>;

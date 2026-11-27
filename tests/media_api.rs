@@ -208,3 +208,26 @@ async fn files_dedupe_per_user_and_are_cleaned_up() {
     assert_eq!(a.call("PUT", &u, Some("alice"), b, true).await.0, StatusCode::OK);
     std::fs::remove_dir_all(&a.media).ok();
 }
+
+#[tokio::test]
+async fn move_endpoint_checks_owner_and_groups() {
+    let a = app("move");
+    let x = a.new_card("alice", "x", false).await.1["id"].as_i64().unwrap();
+    let y = a.new_card("alice", "y", false).await.1["id"].as_i64().unwrap();
+    let t = a.new_card("alice", "t\n- [ ] open", false).await.1["id"].as_i64().unwrap();
+    let mv = |id: i64, prev: Option<i64>, next: Option<i64>| (format!("/api/notes/{id}/move"), serde_json::json!({ "prev": prev, "next": next }).to_string().into_bytes());
+    let (u, b) = mv(x, None, Some(y));
+    assert_eq!(a.call("POST", &u, Some("alice"), b, true).await.0, StatusCode::OK);
+    let (_, _, list) = a.call("GET", "/api/notes", Some("alice"), vec![], false).await;
+    let order: Vec<i64> = serde_json::from_slice::<serde_json::Value>(&list).unwrap().as_array().unwrap().iter().map(|n| n["id"].as_i64().unwrap()).collect();
+    assert_eq!(order, vec![t, x, y]);
+    let (u, b) = mv(x, Some(t), None);
+    assert_eq!(a.call("POST", &u, Some("alice"), b, true).await.0, StatusCode::BAD_REQUEST, "cannot cross the open-todo group");
+    let (u, b) = mv(x, None, None);
+    assert_eq!(a.call("POST", &u, Some("alice"), b, true).await.0, StatusCode::BAD_REQUEST);
+    let (u, b) = mv(x, None, Some(y));
+    assert_eq!(a.call("POST", &u, Some("bob"), b, true).await.0, StatusCode::NOT_FOUND, "bob cannot move alice's card");
+    let (u, b) = mv(x, None, Some(y));
+    assert_eq!(a.call("POST", &u, None, b, true).await.0, StatusCode::UNAUTHORIZED);
+    std::fs::remove_dir_all(&a.media).ok();
+}

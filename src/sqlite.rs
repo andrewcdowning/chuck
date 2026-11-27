@@ -96,7 +96,94 @@ impl SqliteStore {
                 conn.execute("UPDATE notes SET open_todos=?1 WHERE id=?2", params![open_items(&body), id])?;
             }
         }
+        // Manual order: a position per card, highest first within each group. Backfilled from the order cards had
+        // before, so nobody's board changes when this arrives.
+        let has: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('notes') WHERE name='position'", [], |r| r.get(0))?;
+        if has == 0 {
+            conn.execute_batch("ALTER TABLE notes ADD COLUMN position REAL NOT NULL DEFAULT 0;")?;
+            let ids: Vec<(String, i64)> = {
+                let mut st = conn.prepare(
+                    "SELECT owner, id FROM notes ORDER BY owner, (open_todos > 0) DESC,
+                       CASE WHEN open_todos > 0 THEN COALESCE(due_at, 9223372036854775807) END ASC, created_at DESC, id DESC",
+                )?;
+                let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+                v
+            };
+            let mut i = 0usize;
+            while i < ids.len() {
+                let owner = &ids[i].0;
+                let group: Vec<i64> = ids[i..].iter().take_while(|(o, _)| o == owner).map(|(_, id)| *id).collect();
+                for (k, id) in group.iter().enumerate() {
+                    conn.execute("UPDATE notes SET position=?1 WHERE id=?2", params![(group.len() - k) as f64, id])?;
+                }
+                i += group.len();
+            }
+        }
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS notes_owner_position ON notes(owner, position);")?;
         Ok(Self { conn: Mutex::new(conn), generation: AtomicU64::new(0), models: Mutex::new(HashMap::new()) })
+    }
+
+    /// The owner's cards in display order: open todos first, then the rest, each group by position (highest first).
+    fn ordered(conn: &Connection, owner: &str) -> Result<Vec<(i64, f64, bool, Option<i64>)>> {
+        let mut st = conn.prepare(
+            "SELECT n.id, n.position, n.open_todos > 0, n.due_at FROM notes n WHERE n.owner=?1 ORDER BY (n.open_todos > 0) DESC, n.position DESC, n.id DESC",
+        )?;
+        let v = st.query_map([owner], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<std::result::Result<_, _>>()?;
+        Ok(v)
+    }
+
+    /// Spreads the owner's positions back to whole numbers, keeping the order. Needed only after very many moves
+    /// into the same gap have used up floating-point precision.
+    fn renumber(conn: &Connection, owner: &str) -> Result<()> {
+        let all = Self::ordered(conn, owner)?;
+        let n = all.len();
+        for (k, (id, ..)) in all.iter().enumerate() {
+            conn.execute("UPDATE notes SET position=?1 WHERE id=?2 AND owner=?3", params![(n - k) as f64, id, owner])?;
+        }
+        Ok(())
+    }
+
+    /// A position between two neighbours (either may be missing). None if they are too close to split.
+    fn between(above: Option<f64>, below: Option<f64>) -> Option<f64> {
+        let p = match (above, below) {
+            (Some(a), Some(b)) => (a + b) / 2.0,
+            (Some(a), None) => a - 1.0,
+            (None, Some(b)) => b + 1.0,
+            (None, None) => 1.0,
+        };
+        let ok = above.map_or(true, |a| a - p > 1e-9) && below.map_or(true, |b| p - b > 1e-9);
+        ok.then_some(p)
+    }
+
+    /// Where a new card goes. Ordinary cards go on top. A new open todo is slotted by due date among the open todos
+    /// as they are currently ordered: just above the first one due later (or undated); undated todos go last.
+    fn new_position(conn: &Connection, owner: &str, open_todo: bool, due: Option<i64>) -> Result<f64> {
+        let all = Self::ordered(conn, owner)?;
+        let top = all.iter().map(|x| x.1).fold(0.0_f64, f64::max);
+        if !open_todo {
+            let rest_top = all.iter().filter(|x| !x.2).map(|x| x.1).fold(f64::MIN, f64::max);
+            return Ok(if rest_top == f64::MIN { top + 1.0 } else { rest_top.max(top) + 1.0 });
+        }
+        let group: Vec<_> = all.iter().filter(|x| x.2).collect();
+        if group.is_empty() {
+            return Ok(top + 1.0);
+        }
+        let later = |d: Option<i64>| match (due, d) {
+            (Some(a), Some(b)) => b > a,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        let idx = group.iter().position(|x| later(x.3)).unwrap_or(group.len());
+        let above = if idx == 0 { None } else { Some(group[idx - 1].1) };
+        let below = group.get(idx).map(|x| x.1);
+        match Self::between(above, below) {
+            Some(p) => Ok(p),
+            None => {
+                Self::renumber(conn, owner)?;
+                Self::new_position(conn, owner, open_todo, due)
+            }
+        }
     }
 
     /// Notes that carry at least one tag the user wrote, with the hashtags stripped from the text.
@@ -239,9 +326,10 @@ impl NoteStore for SqliteStore {
         let remind_at = input.remind_at.filter(|v| *v > 0);
         let repeat = input.repeat.clone().filter(|r| !r.is_empty());
         let due_at = input.due_at.filter(|v| *v > 0);
+        let position = Self::new_position(&conn, owner, open_items(body) > 0, due_at)?;
         conn.execute(
-            "INSERT INTO notes(owner, body, created_at, updated_at, remind_at, repeat, due_at, open_todos) VALUES(?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7)",
-            params![owner, body, t, remind_at, repeat, due_at, open_items(body)],
+            "INSERT INTO notes(owner, body, created_at, updated_at, remind_at, repeat, due_at, open_todos, position) VALUES(?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![owner, body, t, remind_at, repeat, due_at, open_items(body), position],
         )?;
         let id = conn.last_insert_rowid();
         conn.execute("INSERT INTO notes_fts(rowid, body) VALUES(?1, ?2)", params![id, body])?;
@@ -317,11 +405,7 @@ impl NoteStore for SqliteStore {
             sql.push_str(" AND n.remind_at IS NOT NULL AND n.reminder_done=0 ORDER BY n.remind_at ASC, n.id ASC LIMIT ? OFFSET ?");
         } else {
             // Todo cards with open items stay on top (soonest due first, undated last) until they are complete.
-            sql.push_str(
-                " ORDER BY (n.open_todos > 0) DESC,
-                  CASE WHEN n.open_todos > 0 THEN COALESCE(n.due_at, 9223372036854775807) END ASC,
-                  n.created_at DESC, n.id DESC LIMIT ? OFFSET ?",
-            );
+            sql.push_str(" ORDER BY (n.open_todos > 0) DESC, n.position DESC, n.id DESC LIMIT ? OFFSET ?");
         }
         args.push((q.limit.unwrap_or(50).min(200) as i64).into());
         args.push((q.offset.unwrap_or(0) as i64).into());
@@ -335,6 +419,43 @@ impl NoteStore for SqliteStore {
 
     fn get(&self, owner: &str, id: i64) -> Result<Note> {
         let conn = self.conn.lock().unwrap();
+        Self::load(&conn, owner, id)
+    }
+
+    fn move_note(&self, owner: &str, id: i64, prev: Option<i64>, next: Option<i64>) -> Result<Note> {
+        if prev.is_none() && next.is_none() {
+            return Err(StoreError::Invalid("give the card above or below the new place".into()));
+        }
+        if prev == Some(id) || next == Some(id) {
+            return Err(StoreError::Invalid("a card cannot be its own neighbour".into()));
+        }
+        let conn = self.conn.lock().unwrap();
+        let info = |nid: i64| -> Result<(f64, bool)> {
+            conn.query_row("SELECT position, open_todos > 0 FROM notes WHERE id=?1 AND owner=?2", params![nid, owner], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .ok_or(StoreError::NotFound)
+        };
+        let (_, pinned) = info(id)?;
+        let mut above = prev.map(info).transpose()?;
+        let mut below = next.map(info).transpose()?;
+        if above.iter().chain(below.iter()).any(|(_, p)| *p != pinned) {
+            return Err(StoreError::Invalid("open todo cards stay above the other cards; move it within its group".into()));
+        }
+        if let (Some(a), Some(b)) = (above, below) {
+            if a.0 < b.0 {
+                return Err(StoreError::Invalid("the card above must come before the card below".into()));
+            }
+        }
+        let pos = match Self::between(above.map(|x| x.0), below.map(|x| x.0)) {
+            Some(p) => p,
+            None => {
+                Self::renumber(&conn, owner)?;
+                above = prev.map(info).transpose()?;
+                below = next.map(info).transpose()?;
+                Self::between(above.map(|x| x.0), below.map(|x| x.0)).ok_or_else(|| StoreError::Other("could not place card".into()))?
+            }
+        };
+        conn.execute("UPDATE notes SET position=?1 WHERE id=?2 AND owner=?3", params![pos, id, owner])?;
         Self::load(&conn, owner, id)
     }
 
@@ -557,9 +678,9 @@ mod tests {
         assert_eq!(s.get("me", todo_soon.id).unwrap().due_at, Some(1_000));
         let cleared = s.update("me", todo_soon.id, &mk("Soon\n- [x] y", Some(0))).unwrap();
         assert!(cleared.due_at.is_none());
-        // reopening an item pins it again
+        // reopening an item pins it again, back at its own place in the group
         s.update("me", todo_soon.id, &mk("Soon\n- [ ] y", None)).unwrap();
-        assert_eq!(ids(&s), vec![todo_late.id, todo_soon.id, todo_nodue.id, plain_new.id, plain_old.id]);
+        assert_eq!(ids(&s), vec![todo_soon.id, todo_late.id, todo_nodue.id, plain_new.id, plain_old.id]);
     }
 
     #[test]
@@ -679,5 +800,101 @@ mod tests {
         s.delete("alice", n.id).unwrap();
         assert!(matches!(s.attachment("alice", a1.id), Err(StoreError::NotFound)));
         assert!(!s.blob_referenced("alice", "k1").unwrap());
+    }
+
+    #[test]
+    fn manual_order_within_groups() {
+        let s = SqliteStore::open(":memory:").unwrap();
+        let mk = |b: &str, due: Option<i64>| NoteInput { body: b.into(), due_at: due, ..Default::default() };
+        let a = s.create("me", &mk("a", None)).unwrap().id;
+        let b = s.create("me", &mk("b", None)).unwrap().id;
+        let c = s.create("me", &mk("c", None)).unwrap().id;
+        let t1 = s.create("me", &mk("t1\n- [ ] x", Some(100))).unwrap().id;
+        let t2 = s.create("me", &mk("t2\n- [ ] x", Some(200))).unwrap().id;
+        let other = s.create("you", &mk("theirs", None)).unwrap().id;
+        let ids = |s: &SqliteStore| s.list("me", &NoteQuery::default()).unwrap().into_iter().map(|n| n.id).collect::<Vec<_>>();
+        assert_eq!(ids(&s), vec![t1, t2, c, b, a], "new cards on top, todos slotted by due date");
+
+        // move within the rest: a between c and b; then to the top; then to the bottom
+        s.move_note("me", a, Some(c), Some(b)).unwrap();
+        assert_eq!(ids(&s), vec![t1, t2, c, a, b]);
+        s.move_note("me", b, None, Some(c)).unwrap();
+        assert_eq!(ids(&s), vec![t1, t2, b, c, a]);
+        s.move_note("me", b, Some(a), None).unwrap();
+        assert_eq!(ids(&s), vec![t1, t2, c, a, b]);
+        // within the todo group, manual order replaces due-date order...
+        s.move_note("me", t1, Some(t2), None).unwrap();
+        assert_eq!(ids(&s), vec![t2, t1, c, a, b]);
+        // ...and a new todo is still slotted by due date among them: before the first one due later
+        let t3 = s.create("me", &mk("t3\n- [ ] x", Some(150))).unwrap().id;
+        assert_eq!(ids(&s), vec![t3, t2, t1, c, a, b], "t2 (due 200) is the first due after 150");
+        let t4 = s.create("me", &mk("t4\n- [ ] x", None)).unwrap().id;
+        assert_eq!(ids(&s)[..4], [t3, t2, t1, t4], "undated todos go last in the group");
+
+        // across the group boundary, someone else's card, bad neighbours
+        assert!(matches!(s.move_note("me", a, Some(t1), None), Err(StoreError::Invalid(_))));
+        assert!(matches!(s.move_note("me", t1, Some(c), None), Err(StoreError::Invalid(_))));
+        assert!(matches!(s.move_note("me", a, Some(other), None), Err(StoreError::NotFound)));
+        assert!(matches!(s.move_note("you", a, Some(b), None), Err(StoreError::NotFound)));
+        assert!(matches!(s.move_note("me", a, None, None), Err(StoreError::Invalid(_))));
+        assert!(matches!(s.move_note("me", a, Some(a), None), Err(StoreError::Invalid(_))));
+        assert!(matches!(s.move_note("me", a, Some(b), Some(c)), Err(StoreError::Invalid(_))), "above must come before below");
+        assert_eq!(s.list("you", &NoteQuery::default()).unwrap().len(), 1);
+
+        // completing a todo drops it into the rest at its own position; reopening brings it back to its place
+        s.update("me", t1, &mk("t1\n- [x] x", None)).unwrap();
+        assert!(!ids(&s)[..3].contains(&t1));
+        s.update("me", t1, &mk("t1\n- [ ] x", None)).unwrap();
+        assert_eq!(ids(&s)[..4], [t3, t2, t1, t4]);
+    }
+
+    #[test]
+    fn many_moves_into_one_gap_renumber() {
+        let s = SqliteStore::open(":memory:").unwrap();
+        let mk = |b: &str| NoteInput { body: b.into(), ..Default::default() };
+        let x = s.create("me", &mk("x")).unwrap().id;
+        let y = s.create("me", &mk("y")).unwrap().id;
+        let movers: Vec<i64> = (0..80).map(|i| s.create("me", &mk(&format!("m{i}"))).unwrap().id).collect();
+        // keep pushing cards between y and the previous mover: halves the gap every time (far past f64 precision)
+        let mut below = x;
+        for m in &movers {
+            s.move_note("me", *m, Some(y), Some(below)).unwrap();
+            below = *m;
+        }
+        let ids: Vec<i64> = s.list("me", &NoteQuery { limit: Some(200), ..Default::default() }).unwrap().into_iter().map(|n| n.id).collect();
+        let mut expect = vec![y];
+        expect.extend(movers.iter().rev());
+        expect.push(x);
+        assert_eq!(ids, expect);
+    }
+
+    #[test]
+    fn migration_keeps_existing_order() {
+        let path = std::env::temp_dir().join(format!("chuck-migrate-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let p = path.to_str().unwrap();
+        let mk = |b: &str, due: Option<i64>| NoteInput { body: b.into(), due_at: due, ..Default::default() };
+        let before: Vec<i64> = {
+            let s = SqliteStore::open(p).unwrap();
+            s.create("me", &mk("old", None)).unwrap();
+            s.create("me", &mk("late\n- [ ] x", Some(300))).unwrap();
+            s.create("me", &mk("soon\n- [ ] x", Some(100))).unwrap();
+            s.create("me", &mk("new", None)).unwrap();
+            s.create("you", &mk("yours", None)).unwrap();
+            s.list("me", &NoteQuery::default()).unwrap().into_iter().map(|n| n.id).collect()
+        };
+        // simulate a database from before manual ordering
+        {
+            let c = Connection::open(p).unwrap();
+            c.execute_batch("DROP INDEX notes_owner_position; ALTER TABLE notes DROP COLUMN position;").unwrap();
+            // scramble creation times so only the old rule (todos by due date, then newest first) can explain the order
+            c.execute("UPDATE notes SET created_at = id * 10", []).unwrap();
+        }
+        let s = SqliteStore::open(p).unwrap();
+        let after: Vec<i64> = s.list("me", &NoteQuery::default()).unwrap().into_iter().map(|n| n.id).collect();
+        assert_eq!(after, before);
+        assert_eq!(s.list("you", &NoteQuery::default()).unwrap().len(), 1);
+        drop(s);
+        let _ = std::fs::remove_file(&path);
     }
 }
