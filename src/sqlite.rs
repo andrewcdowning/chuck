@@ -253,6 +253,9 @@ impl SqliteStore {
 
     fn attachment_row(r: &rusqlite::Row) -> rusqlite::Result<Attachment> {
         let thumb_key: Option<String> = r.get(8)?;
+        let blob_key: String = r.get(7)?;
+        // Derived from the storage keys, which already include the owner, so two users' files never share a version.
+        let v = crate::blob::sha256_hex(format!("{blob_key}|{}", thumb_key.as_deref().unwrap_or("")).as_bytes())[..16].to_string();
         Ok(Attachment {
             id: r.get(0)?,
             note_id: r.get(1)?,
@@ -262,7 +265,8 @@ impl SqliteStore {
             height: r.get(5)?,
             name: r.get(6)?,
             has_thumb: thumb_key.is_some(),
-            blob_key: r.get(7)?,
+            v,
+            blob_key,
             thumb_key,
         })
     }
