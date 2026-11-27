@@ -1,6 +1,13 @@
 # Spec: media cards
 
-Status: draft for review. Nothing here is built yet.
+Status: phase 1 (photos) built in PR 11. Decisions taken: D1 files in a folder next to the database; D2 only the resized,
+metadata-stripped copy is kept, no originals; D3 HEIC converted where the browser can read it (Safari), rejected elsewhere;
+D4 other files rejected; D5 video later.
+
+Phase 1 as built: the server accepts JPEG, PNG, GIF and WebP, detected from the bytes, and strips metadata itself (EXIF, XMP,
+IPTC, comments, PNG text chunks, WebP EXIF/XMP chunks) whatever the client did. The browser converts AVIF and HEIC before
+upload. GIFs are stored as uploaded so animation survives. Not yet built: alt text editing, upload cancel, audio, SVG,
+video, zip export.
 
 ## Goal
 
