@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize)]
 pub struct Note {
     pub id: i64,
-    /// Card kind, derived from content: "reminder", "todo" (has checklist items) or "note".
+    /// Card kind, derived from content: "reminder", "todo" (has checklist items), "media" (has attachments) or "note".
     pub kind: &'static str,
     pub body: String,
     pub tags: Vec<String>,
@@ -20,7 +20,41 @@ pub struct Note {
     pub reminder_done: bool,
     /// Due date for todo cards (unix seconds, chosen by the client, usually end of the local day).
     pub due_at: Option<i64>,
+    /// Pictures (and later audio) on the card, in display order.
+    pub attachments: Vec<Attachment>,
 }
+
+/// A file attached to a note. The storage keys are never sent to clients; files are served by id after an owner check.
+#[derive(Debug, Clone, Serialize)]
+pub struct Attachment {
+    pub id: i64,
+    pub note_id: i64,
+    /// Detected from the file's bytes.
+    pub mime: String,
+    pub bytes: i64,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    /// Original file name, for display only.
+    pub name: Option<String>,
+    pub has_thumb: bool,
+    #[serde(skip)]
+    pub blob_key: String,
+    #[serde(skip)]
+    pub thumb_key: Option<String>,
+}
+
+pub struct NewAttachment {
+    pub mime: String,
+    pub bytes: i64,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub name: Option<String>,
+    pub blob_key: String,
+    pub sha256: String,
+}
+
+/// Most attachments one card can hold.
+pub const MAX_ATTACHMENTS_PER_NOTE: i64 = 50;
 
 /// Create/update payload. On update, an absent field means "unchanged";
 /// `remind_at <= 0`, `due_at <= 0` or `repeat == ""` clears it. Changing `remind_at` re-arms the reminder.
@@ -103,6 +137,16 @@ pub trait NoteStore: Send + Sync + 'static {
     /// Re-tags every note with the current rules. Returns how many notes changed.
     fn apply_rules(&self, owner: &str) -> Result<usize>;
 
+    /// Attaches a stored file to one of the owner's notes. NotFound if the note is not theirs.
+    fn add_attachment(&self, owner: &str, note_id: i64, a: &NewAttachment) -> Result<Attachment>;
+    fn attachment(&self, owner: &str, id: i64) -> Result<Attachment>;
+    /// Sets the preview image. Returns the key of the preview it replaced, if any, so the caller can clean it up.
+    fn set_attachment_thumb(&self, owner: &str, id: i64, thumb_key: &str) -> Result<Option<String>>;
+    /// Removes an attachment and returns it, so the caller can clean up its files.
+    fn delete_attachment(&self, owner: &str, id: i64) -> Result<Attachment>;
+    /// True if any of the owner's attachments still uses this storage key (as a file or a preview).
+    fn blob_referenced(&self, owner: &str, key: &str) -> Result<bool>;
+
 }
 
 /// Parses `- [ ] text`, `* [x] text` (leading whitespace allowed). Returns (done, text).
@@ -125,11 +169,13 @@ pub fn open_items(body: &str) -> i64 {
     body.lines().filter(|l| matches!(parse_item(l), Some((false, _)))).count() as i64
 }
 
-pub fn card_kind(body: &str, remind_at: Option<i64>) -> &'static str {
+pub fn card_kind(body: &str, remind_at: Option<i64>, has_media: bool) -> &'static str {
     if remind_at.is_some() {
         "reminder"
     } else if body.lines().any(|l| parse_item(l).is_some()) {
         "todo"
+    } else if has_media {
+        "media"
     } else {
         "note"
     }
@@ -206,8 +252,10 @@ mod tests {
         assert_eq!(normalize_tag("#Work-1").as_deref(), Some("work-1"));
         assert!(normalize_tag("a b").is_none());
         assert!(normalize_tag("").is_none());
-        assert_eq!(card_kind("- [ ] a", None), "todo");
-        assert_eq!(card_kind("x", Some(5)), "reminder");
-        assert_eq!(card_kind("x", None), "note");
+        assert_eq!(card_kind("- [ ] a", None, false), "todo");
+        assert_eq!(card_kind("x", Some(5), true), "reminder");
+        assert_eq!(card_kind("- [ ] a", None, true), "todo");
+        assert_eq!(card_kind("x", None, true), "media");
+        assert_eq!(card_kind("x", None, false), "note");
     }
 }

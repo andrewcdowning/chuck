@@ -3,8 +3,10 @@
 
 pub mod api;
 pub mod auth;
+pub mod blob;
 pub mod cli;
 pub mod export;
+pub mod media;
 pub mod sqlite;
 pub mod store;
 pub mod tagging;
@@ -16,16 +18,23 @@ pub struct Options {
     pub addr: String,
     /// Replaces the default SQLite store when set.
     pub store: Option<Arc<dyn store::NoteStore>>,
+    /// Replaces the default attachment folder when set (for example with an S3 store).
+    pub blobs: Option<Arc<dyn blob::BlobStore>>,
+    /// Folder for attachments; defaults to `<database name>-media` beside the database.
+    pub media_dir: Option<String>,
     pub providers: auth::Providers,
 }
 
 impl Options {
-    /// `CHUCK_DB` (default `chuck.db`) and `CHUCK_ADDR` (default `127.0.0.1:3000`).
+    /// `CHUCK_DB` (default `chuck.db`), `CHUCK_ADDR` (default `127.0.0.1:3000`), `CHUCK_MEDIA_DIR` (default: a
+    /// `<database name>-media` folder beside the database).
     pub fn from_env() -> Self {
         Self {
             db: std::env::var("CHUCK_DB").unwrap_or_else(|_| "chuck.db".into()),
             addr: std::env::var("CHUCK_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".into()),
             store: None,
+            blobs: None,
+            media_dir: std::env::var("CHUCK_MEDIA_DIR").ok().filter(|v| !v.is_empty()),
             providers: auth::Providers::default(),
         }
     }
@@ -44,12 +53,24 @@ impl Options {
         self.store = Some(store);
         self
     }
+
+    pub fn with_blobs(mut self, blobs: Arc<dyn blob::BlobStore>) -> Self {
+        self.blobs = Some(blobs);
+        self
+    }
 }
 
 pub async fn run(opts: Options) -> Result<(), String> {
     let store: Arc<dyn store::NoteStore> = match opts.store {
         Some(s) => s,
         None => Arc::new(sqlite::SqliteStore::open(&opts.db).map_err(|e| format!("open database: {e:?}"))?),
+    };
+    let blobs: Arc<dyn blob::BlobStore> = match opts.blobs {
+        Some(b) => b,
+        None => {
+            let dir = opts.media_dir.map(std::path::PathBuf::from).unwrap_or_else(|| blob::FsBlobStore::default_dir(&opts.db));
+            Arc::new(blob::FsBlobStore::open(&dir).map_err(|e| format!("open media folder {}: {e}", dir.display()))?)
+        }
     };
     let cfg = auth::from_env(&opts.providers).map_err(|e| format!("auth config error: {e}"))?;
 
@@ -64,7 +85,7 @@ pub async fn run(opts: Options) -> Result<(), String> {
         }
     }
 
-    let app = api::router(api::AppState { store, auth: cfg.auth });
+    let app = api::router(api::AppState { store, auth: cfg.auth, blobs });
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("bind {addr}: {e}"))?;
     println!("chuck listening on http://{addr} (auth: {})", cfg.names.join(","));
     axum::serve(listener, app).await.map_err(|e| e.to_string())
