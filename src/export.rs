@@ -23,6 +23,14 @@ pub fn fmt_utc(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", t / 3600, (t % 3600) / 60)
 }
 
+fn human_size(b: i64) -> String {
+    match b {
+        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1 << 20) as f64),
+        b if b >= 1 << 10 => format!("{} KB", b >> 10),
+        b => format!("{b} B"),
+    }
+}
+
 pub fn fmt_date(secs: i64) -> String {
     let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
     format!("{y:04}-{m:02}-{d:02}")
@@ -49,6 +57,14 @@ pub fn to_markdown(notes: &[Note], now_secs: i64) -> String {
                 r.push_str(" [done]");
             }
             meta.push(r);
+        }
+        if !n.attachments.is_empty() {
+            let list: Vec<String> = n
+                .attachments
+                .iter()
+                .map(|a| format!("{} ({}, {})", a.name.as_deref().unwrap_or("file"), a.mime, human_size(a.bytes)))
+                .collect();
+            meta.push(format!("Attachments: {}", list.join(", ")));
         }
         if let Some(due) = n.due_at {
             meta.push(format!("Due: {}", fmt_date(due)));
@@ -79,6 +95,7 @@ mod tests {
             repeat: None,
             reminder_done: false,
             due_at: None,
+            attachments: vec![],
         }
     }
 

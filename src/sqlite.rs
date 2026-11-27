@@ -50,7 +50,23 @@ impl SqliteStore {
                action TEXT NOT NULL CHECK(action IN ('accepted','dismissed')),
                confidence REAL NOT NULL,
                created_at INTEGER NOT NULL);
-             CREATE INDEX IF NOT EXISTS suggestion_events_owner ON suggestion_events(owner, tag);",
+             CREATE INDEX IF NOT EXISTS suggestion_events_owner ON suggestion_events(owner, tag);
+             CREATE TABLE IF NOT EXISTS attachments(
+               id INTEGER PRIMARY KEY,
+               owner TEXT NOT NULL,
+               note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+               position INTEGER NOT NULL,
+               blob_key TEXT NOT NULL,
+               thumb_key TEXT,
+               sha256 TEXT NOT NULL,
+               mime TEXT NOT NULL,
+               bytes INTEGER NOT NULL,
+               width INTEGER,
+               height INTEGER,
+               name TEXT,
+               created_at INTEGER NOT NULL);
+             CREATE INDEX IF NOT EXISTS attachments_note ON attachments(note_id, position);
+             CREATE INDEX IF NOT EXISTS attachments_owner_blob ON attachments(owner, blob_key);",
         )?;
         // Additive migration for databases created before reminders existed.
         let has: i64 = conn.query_row(
@@ -133,6 +149,7 @@ impl SqliteStore {
                         repeat: r.get(5)?,
                         reminder_done: r.get::<_, i64>(6)? != 0,
                         due_at: r.get(7)?,
+                        attachments: vec![],
                     })
                 },
             )
@@ -140,8 +157,39 @@ impl SqliteStore {
             .ok_or(StoreError::NotFound)?;
         let mut st = conn.prepare("SELECT tag FROM note_tags WHERE note_id=?1 ORDER BY tag")?;
         note.tags = st.query_map([id], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
-        note.kind = card_kind(&note.body, note.remind_at);
+        note.attachments = Self::note_attachments(conn, owner, id)?;
+        note.kind = card_kind(&note.body, note.remind_at, !note.attachments.is_empty());
         Ok(note)
+    }
+
+    const ATTACHMENT_COLS: &'static str = "id, note_id, mime, bytes, width, height, name, blob_key, thumb_key";
+
+    fn attachment_row(r: &rusqlite::Row) -> rusqlite::Result<Attachment> {
+        let thumb_key: Option<String> = r.get(8)?;
+        Ok(Attachment {
+            id: r.get(0)?,
+            note_id: r.get(1)?,
+            mime: r.get(2)?,
+            bytes: r.get(3)?,
+            width: r.get(4)?,
+            height: r.get(5)?,
+            name: r.get(6)?,
+            has_thumb: thumb_key.is_some(),
+            blob_key: r.get(7)?,
+            thumb_key,
+        })
+    }
+
+    fn note_attachments(conn: &Connection, owner: &str, note_id: i64) -> Result<Vec<Attachment>> {
+        let sql = format!("SELECT {} FROM attachments WHERE note_id=?1 AND owner=?2 ORDER BY position, id", Self::ATTACHMENT_COLS);
+        let mut st = conn.prepare(&sql)?;
+        let rows = st.query_map(params![note_id, owner], Self::attachment_row)?.collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    fn load_attachment(conn: &Connection, owner: &str, id: i64) -> Result<Attachment> {
+        let sql = format!("SELECT {} FROM attachments WHERE id=?1 AND owner=?2", Self::ATTACHMENT_COLS);
+        conn.query_row(&sql, params![id, owner], Self::attachment_row).optional()?.ok_or(StoreError::NotFound)
     }
 
     fn rule_pairs(conn: &Connection, owner: &str) -> Result<Vec<(String, String)>> {
@@ -369,6 +417,59 @@ impl NoteStore for SqliteStore {
         Ok(changed)
     }
 
+    fn add_attachment(&self, owner: &str, note_id: i64, a: &NewAttachment) -> Result<Attachment> {
+        let conn = self.conn.lock().unwrap();
+        let mine: i64 = conn.query_row("SELECT COUNT(*) FROM notes WHERE id=?1 AND owner=?2", params![note_id, owner], |r| r.get(0))?;
+        if mine == 0 {
+            return Err(StoreError::NotFound);
+        }
+        let (count, next): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(MAX(position), -1) + 1 FROM attachments WHERE note_id=?1 AND owner=?2",
+            params![note_id, owner],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if count >= MAX_ATTACHMENTS_PER_NOTE {
+            return Err(StoreError::Other("too many attachments on this card".into()));
+        }
+        conn.execute(
+            "INSERT INTO attachments(owner, note_id, position, blob_key, sha256, mime, bytes, width, height, name, created_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![owner, note_id, next, a.blob_key, a.sha256, a.mime, a.bytes, a.width, a.height, a.name, now()],
+        )?;
+        let id = conn.last_insert_rowid();
+        conn.execute("UPDATE notes SET updated_at=?1 WHERE id=?2 AND owner=?3", params![now(), note_id, owner])?;
+        Self::load_attachment(&conn, owner, id)
+    }
+
+    fn attachment(&self, owner: &str, id: i64) -> Result<Attachment> {
+        let conn = self.conn.lock().unwrap();
+        Self::load_attachment(&conn, owner, id)
+    }
+
+    fn set_attachment_thumb(&self, owner: &str, id: i64, thumb_key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let old = Self::load_attachment(&conn, owner, id)?.thumb_key;
+        conn.execute("UPDATE attachments SET thumb_key=?1 WHERE id=?2 AND owner=?3", params![thumb_key, id, owner])?;
+        Ok(old.filter(|k| k != thumb_key))
+    }
+
+    fn delete_attachment(&self, owner: &str, id: i64) -> Result<Attachment> {
+        let conn = self.conn.lock().unwrap();
+        let a = Self::load_attachment(&conn, owner, id)?;
+        conn.execute("DELETE FROM attachments WHERE id=?1 AND owner=?2", params![id, owner])?;
+        Ok(a)
+    }
+
+    fn blob_referenced(&self, owner: &str, key: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM attachments WHERE owner=?1 AND (blob_key=?2 OR thumb_key=?2)",
+            params![owner, key],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     fn tags(&self, owner: &str) -> Result<Vec<TagCount>> {
         let conn = self.conn.lock().unwrap();
         let mut st = conn.prepare(
@@ -530,5 +631,53 @@ mod tests {
             s2.create("me", &inp(&format!("Sourdough starter feeding schedule {i} #baking"))).unwrap();
         }
         assert!(s2.suggest_tags("me", "feed the sourdough starter").unwrap().suggestions.iter().any(|x| x.tag == "baking"));
+    }
+
+    #[test]
+    fn attachments_are_owned_ordered_and_cascade() {
+        let s = SqliteStore::open(":memory:").unwrap();
+        let inp = |b: &str| NoteInput { body: b.into(), ..Default::default() };
+        let n = s.create("alice", &inp("holiday")).unwrap();
+        let other = s.create("bob", &inp("bob's")).unwrap();
+        assert_eq!(n.kind, "note");
+        let new = |key: &str| NewAttachment {
+            mime: "image/jpeg".into(),
+            bytes: 10,
+            width: Some(640),
+            height: Some(480),
+            name: Some("a.jpg".into()),
+            blob_key: key.into(),
+            sha256: "x".into(),
+        };
+        let a1 = s.add_attachment("alice", n.id, &new("k1")).unwrap();
+        let a2 = s.add_attachment("alice", n.id, &new("k2")).unwrap();
+        let note = s.get("alice", n.id).unwrap();
+        assert_eq!(note.kind, "media");
+        assert_eq!(note.attachments.iter().map(|a| a.id).collect::<Vec<_>>(), vec![a1.id, a2.id]);
+        // keys never serialize
+        let json = serde_json::to_string(&note).unwrap();
+        assert!(!json.contains("k1") && json.contains("\"has_thumb\":false"));
+
+        // another user can neither attach to, read, change nor delete alice's attachments
+        assert!(matches!(s.add_attachment("bob", n.id, &new("kb")), Err(StoreError::NotFound)));
+        assert!(matches!(s.attachment("bob", a1.id), Err(StoreError::NotFound)));
+        assert!(matches!(s.set_attachment_thumb("bob", a1.id, "t"), Err(StoreError::NotFound)));
+        assert!(matches!(s.delete_attachment("bob", a1.id), Err(StoreError::NotFound)));
+        assert!(!s.blob_referenced("bob", "k1").unwrap());
+        assert!(s.get("bob", other.id).unwrap().attachments.is_empty());
+
+        // previews
+        assert_eq!(s.set_attachment_thumb("alice", a1.id, "t1").unwrap(), None);
+        assert_eq!(s.set_attachment_thumb("alice", a1.id, "t2").unwrap(), Some("t1".to_string()));
+        assert!(s.attachment("alice", a1.id).unwrap().has_thumb);
+        assert!(s.blob_referenced("alice", "t2").unwrap() && !s.blob_referenced("alice", "t1").unwrap());
+
+        // delete one, then the note: the rest cascade
+        let gone = s.delete_attachment("alice", a2.id).unwrap();
+        assert_eq!(gone.blob_key, "k2");
+        assert!(!s.blob_referenced("alice", "k2").unwrap());
+        s.delete("alice", n.id).unwrap();
+        assert!(matches!(s.attachment("alice", a1.id), Err(StoreError::NotFound)));
+        assert!(!s.blob_referenced("alice", "k1").unwrap());
     }
 }
