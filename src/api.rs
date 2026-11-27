@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/notes", get(list).post(create))
         .route("/api/notes/:id", put(update).delete(remove))
+        .route("/api/notes/:id/move", post(move_note))
         .route("/api/tags", get(tags))
         .route("/api/export", get(export))
         .route("/api/suggest", post(suggest))
@@ -56,6 +57,7 @@ impl From<StoreError> for ApiError {
     fn from(e: StoreError) -> Self {
         match e {
             StoreError::NotFound => ApiError(StatusCode::NOT_FOUND, "not found".into()),
+            StoreError::Invalid(m) => ApiError(StatusCode::BAD_REQUEST, m),
             StoreError::Other(m) => {
                 eprintln!("store error: {m}");
                 ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
@@ -390,4 +392,18 @@ async fn delete_media(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i6
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct MoveInput {
+    /// The card that will be directly above (before) this one, or null for the top of its group.
+    prev: Option<i64>,
+    /// The card that will be directly below (after) this one, or null for the bottom.
+    next: Option<i64>,
+}
+
+async fn move_note(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Json(b): Json<MoveInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let st = s.store.clone();
+    Ok(Json(blocking(move || st.move_note(&o, id, b.prev, b.next)).await?))
 }

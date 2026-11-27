@@ -183,6 +183,16 @@
   .lightbox { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: rgba(0,0,0,.88); cursor: zoom-out; }
   .lightbox img { max-width: 94vw; max-height: 86vh; object-fit: contain; border-radius: 6px; }
   .lightbox .cap { color: #ddd; font: 500 12px var(--mono); }
+  /* Moving cards */
+  .head .lead { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .grip { border: 0; background: transparent; color: inherit; font: 15px/1 var(--mono); padding: 4px 6px; margin: -4px 0 -4px -8px;
+          border-radius: 6px; cursor: grab; touch-action: none; opacity: .65; }
+  .grip:hover, .grip:focus-visible { opacity: 1; background: color-mix(in srgb, currentColor 16%, transparent); outline: none; }
+  .note.dragging { position: fixed; z-index: 40; margin: 0; pointer-events: none; opacity: .96; box-shadow: 0 14px 34px rgba(0,0,0,.28); }
+  .note.placeholder { border: 2px dashed var(--tx); background: transparent; box-shadow: none; }
+  .note.picked { outline: 3px solid var(--tx); outline-offset: 3px; }
+  body.moving-card, body.moving-card * { cursor: grabbing !important; user-select: none; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -228,6 +238,7 @@
   </main>
 </div>
 <div class="toasts" id="toasts"></div>
+<div class="sr" id="live" aria-live="polite"></div>
 <script>
 const $ = id => document.getElementById(id);
 const PAGE = 50;
@@ -827,13 +838,25 @@ function noteEl(n, compact) {
   const card = el("div", { className: "note" + (compact ? " compact" : "") });
   if (n.tags.length) paint(card, n.tags[0]); else card.classList.add("plain");
   const stats = isList(n.body) ? listStats(n.body) : null;
+  card.dataset.id = n.id;
+  // Same rule as the server: a card with any unchecked item is in the pinned group above the rest.
+  card.dataset.group = stats && stats.total > stats.done ? "pin" : "rest";
   const created = new Date(n.created_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   const acts = el("div", { className: "acts" },
     el("button", { textContent: "Edit", onclick: () => edit(card, n, compact) }),
     el("button", { textContent: "Delete", onclick: async () => {
       if (confirm("Delete this note?")) { await api("/api/notes/" + n.id, { method: "DELETE" }); refresh(); }
     } }));
-  const head = el("div", { className: "head" }, el("span", { textContent: created }));
+  const lead = el("span", { className: "lead" });
+  if (filter !== "@reminders") {   // the reminders view is sorted by time, so cards are not moved there
+    const grip = el("button", { className: "grip", type: "button", textContent: "⠿", title: "Drag to move. Or press Space, then the arrow keys.",
+      "aria-label": "Move card", "aria-roledescription": "drag handle" });
+    grip.addEventListener("pointerdown", e => startCardDrag(e, card));
+    grip.addEventListener("keydown", e => keyMoveCard(e, card));
+    lead.append(grip);
+  }
+  lead.append(el("span", { textContent: created }));
+  const head = el("div", { className: "head" }, lead);
   if (stats) {
     const pct = stats.total ? Math.round(100 * stats.done / stats.total) : 0;
     const bar = el("span", { className: "bar2" }, el("i", { style: `width:${pct}%` }));
@@ -986,6 +1009,117 @@ function setupRules() {
   loadRules();
 }
 
+/* ---------- moving cards ----------
+   Drag a card by its grip: it floats under the pointer, a dashed placeholder shows where it will land, and the board
+   reflows (Columns re-packs). Dropping puts the card in the placeholder's place at once and saves in the background;
+   if saving fails the card goes back. Open todos stay above the other cards, so a card only moves within its group.
+   Keyboard: focus the grip, Space to pick up, arrow keys to move, Space to drop, Escape to cancel. */
+const sameGroup = (a, b) => b && b.classList.contains("note") && !b.classList.contains("placeholder") && !b.classList.contains("dragging") && b.dataset.group === a.dataset.group;
+function groupNeighbours(card) {
+  let p = card.previousElementSibling, n = card.nextElementSibling;
+  while (p && !sameGroup(card, p)) p = p.previousElementSibling;
+  while (n && !sameGroup(card, n)) n = n.nextElementSibling;
+  return { prev: p ? Number(p.dataset.id) : null, next: n ? Number(n.dataset.id) : null };
+}
+const say = text => { $("live").textContent = text; };
+function originOf(card) { return { parent: card.parentElement, nextNode: card.nextSibling, ...groupNeighbours(card) }; }
+function putBack(card, o) { o.parent.insertBefore(card, o.nextNode && o.nextNode.parentNode === o.parent ? o.nextNode : null); }
+
+async function saveMove(card, o) {
+  const { prev, next } = groupNeighbours(card);
+  if (prev === o.prev && next === o.next) return;   // dropped where it started
+  try { await api(`/api/notes/${card.dataset.id}/move`, { method: "POST", body: JSON.stringify({ prev, next }) }); }
+  catch (e) { putBack(card, o); say("Move failed."); alert("Couldn't move the card: " + e.message); }
+}
+
+function startCardDrag(e, card) {
+  if (e.button > 0 || card.classList.contains("picked")) return;
+  e.preventDefault();
+  const board = $("out"), rect = card.getBoundingClientRect();
+  const o = originOf(card);
+  const ph = el("div", { className: "note placeholder" + (card.classList.contains("compact") ? " compact" : "") });
+  ph.dataset.group = card.dataset.group;
+  ph.style.height = rect.height + "px";
+  card.before(ph);
+  Object.assign(card.style, { width: rect.width + "px", height: rect.height + "px", left: rect.left + "px", top: rect.top + "px" });
+  card.classList.add("dragging");
+  document.body.classList.add("moving-card");
+  document.body.append(card);   // out of the board, so the board reflows around the placeholder
+  const dx = e.clientX - rect.left, dy = e.clientY - rect.top;
+  let x = e.clientX, y = e.clientY, raf = 0;
+
+  const place = () => {
+    const t = document.elementFromPoint(x, y)?.closest("#out > .note");
+    if (!t || t === ph || t.dataset.group !== card.dataset.group) return;
+    const r = t.getBoundingClientRect();
+    const before = board.classList.contains("rows") ? x < r.left + r.width / 2 : y < r.top + r.height / 2;
+    if (before) { if (t.previousElementSibling !== ph) t.before(ph); }
+    else if (t.nextElementSibling !== ph) t.after(ph);
+  };
+  const tick = () => {   // scroll when the pointer is near the top or bottom of the window
+    const edge = 70, speed = y < edge ? -(edge - y) / 3 : y > innerHeight - edge ? (y - innerHeight + edge) / 3 : 0;
+    if (speed) { scrollBy(0, speed); place(); }
+    raf = requestAnimationFrame(tick);
+  };
+  const move = ev => { x = ev.clientX; y = ev.clientY; card.style.left = x - dx + "px"; card.style.top = y - dy + "px"; place(); };
+  const finish = cancel => {
+    removeEventListener("pointermove", move);
+    removeEventListener("pointerup", up);
+    removeEventListener("pointercancel", cancelled);
+    removeEventListener("keydown", esc, true);
+    cancelAnimationFrame(raf);
+    card.classList.remove("dragging");
+    document.body.classList.remove("moving-card");
+    card.style.width = card.style.height = card.style.left = card.style.top = "";
+    if (cancel) { ph.remove(); putBack(card, o); return; }
+    ph.replaceWith(card);
+    saveMove(card, o);
+  };
+  const up = () => finish(false);
+  const cancelled = () => finish(true);
+  const esc = ev => { if (ev.key === "Escape") { ev.preventDefault(); finish(true); } };
+  addEventListener("pointermove", move);
+  addEventListener("pointerup", up);
+  addEventListener("pointercancel", cancelled);
+  addEventListener("keydown", esc, true);
+  raf = requestAnimationFrame(tick);
+}
+
+function keyMoveCard(e, card) {
+  const grip = () => card.querySelector(".grip");
+  if (e.key === " " || e.key === "Enter") {
+    e.preventDefault();
+    if (!card.classList.contains("picked")) {
+      card._origin = originOf(card);
+      card.classList.add("picked");
+      say("Card picked up. Arrow keys move it, Space drops it, Escape cancels.");
+    } else {
+      card.classList.remove("picked");
+      saveMove(card, card._origin);
+      say("Card dropped.");
+    }
+    return;
+  }
+  if (!card.classList.contains("picked")) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    card.classList.remove("picked");
+    putBack(card, card._origin);
+    grip()?.focus();
+    say("Move cancelled.");
+    return;
+  }
+  const back = e.key === "ArrowUp" || e.key === "ArrowLeft", fwd = e.key === "ArrowDown" || e.key === "ArrowRight";
+  if (!back && !fwd) return;
+  e.preventDefault();
+  let t = back ? card.previousElementSibling : card.nextElementSibling;
+  while (t && !sameGroup(card, t)) t = back ? t.previousElementSibling : t.nextElementSibling;
+  if (!t) { say(back ? "Already first in its group." : "Already last in its group."); return; }
+  back ? t.before(card) : t.after(card);
+  grip()?.focus();   // moving the element can drop focus
+  card.scrollIntoView({ block: "nearest" });
+}
+
 /* ---------- loading: feed and board ---------- */
 function params(extra = {}) {
   const p = new URLSearchParams();
@@ -1024,13 +1158,16 @@ new MutationObserver(muts => {
 }).observe(boardEl, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
 boardEl.addEventListener("load", e => { if (e.target.tagName === "IMG") { const c = e.target.closest("#out > .note"); if (c) packCard(c); } }, true);
 
+let feedSeq = 0;   // only the newest load may write to the board (fast view switches or typing start several)
 async function loadFeed(reset) {
   const board = view === "board";
-  if (reset) { offset = 0; $("out").replaceChildren(); }
-  $("out").className = board ? "grid " + boardLayout : "";
-  const extra = { limit: PAGE, offset };
+  const mine = ++feedSeq;
+  const extra = { limit: PAGE, offset: reset ? 0 : offset };
   if (filter === "@reminders") extra.reminders = "true"; else if (filter) extra.tag = filter;
   const notes = await api("/api/notes?" + params(extra));
+  if (mine !== feedSeq) return;
+  if (reset) { offset = 0; $("out").replaceChildren(); }
+  $("out").className = board ? "grid " + boardLayout : "";
   notes.forEach(n => $("out").append(cardEl(n, board)));
   offset += notes.length;
   if (reset && !notes.length) $("out").append(el("div", { className: "empty", textContent: filter === "@reminders" ? "No pending reminders" : "Nothing here yet" }));
