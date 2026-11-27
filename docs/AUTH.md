@@ -74,7 +74,7 @@ Lock the task security group to the ALB so requests cannot skip it.
     CHUCK_JWT_ISSUER=https://cognito-idp.<region>.amazonaws.com/<pool-id>
     CHUCK_JWT_AUDIENCE=<app client id>
 
-## Plugging in your own provider (Midway, a CDN signer, anything else)
+## Plugging in your own provider
 
 You do not need to change or fork Chuck. Chuck is also a library: write a small binary in your own repo that registers
 your provider and starts the server. The provider is then selected with `CHUCK_AUTH=<name>`, alone or in a list
