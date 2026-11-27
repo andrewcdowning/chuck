@@ -18,7 +18,8 @@ pub const MIN_SHOW: f64 = 0.30;
 /// At or above this confidence a suggestion is labelled "high".
 pub const HIGH: f64 = 0.70;
 
-const MIN_DOCS_TO_CALIBRATE: usize = 12;
+/// Tagged notes needed before confidences are calibrated (and can be labelled "high").
+pub const MIN_DOCS_TO_CALIBRATE: usize = 12;
 const MIN_CALIBRATION_SAMPLES: usize = 30;
 const UNCALIBRATED_CAP: f64 = 0.60;
 const DEFAULT_TEMP: f64 = 0.5;
@@ -45,6 +46,17 @@ pub struct Suggestion {
     pub tier: &'static str,
     /// The strongest evidence, for display ("because ...").
     pub why: Vec<String>,
+}
+
+/// What the composer needs: the suggestions, plus enough context to explain an empty list.
+#[derive(Debug, Clone, Serialize)]
+pub struct SuggestionSet {
+    pub suggestions: Vec<Suggestion>,
+    /// Notes with at least one tag the user wrote: what the model learned from.
+    pub tagged_notes: usize,
+    pub calibrated: bool,
+    /// Tagged notes needed before calibration.
+    pub calibrate_at: usize,
 }
 
 /// A training document: the tags the user wrote on a note and the note text with the hashtags removed.
@@ -102,19 +114,25 @@ fn tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// (distinct word stems, features): features are `w:<stem>`.
+/// Every word of the text, any length and including common words, stemmed like features. Used only to check
+/// whether a tag's own name appears, so short or common tag names (`#ai`, `#ux`, `#qa`, `#new`) still match.
+fn name_words(text: &str) -> HashSet<String> {
+    text.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(stem).collect()
+}
+
+/// (words for tag-name matching, features): features are `w:<stem>`.
 ///
 /// Adjacent word pairs were tried and removed: on a noisy synthetic corpus they lowered top-1 accuracy by 3 to 5
 /// points. `chuck eval-tags` makes it cheap to try them again on real notes.
 fn features(text: &str) -> (HashSet<String>, Vec<String>) {
-    let mut words = HashSet::new();
+    let mut seen = HashSet::new();
     let mut base = Vec::new();
     for t in tokens(text) {
-        if words.len() < MAX_WORDS && words.insert(t.clone()) {
+        if seen.len() < MAX_WORDS && seen.insert(t.clone()) {
             base.push(format!("w:{t}"));
         }
     }
-    (words, base)
+    (name_words(text), base)
 }
 
 /// True if the tag's own name appears in the text ("aws" in a note that mentions AWS).
@@ -818,6 +836,30 @@ mod tests {
         assert_eq!(tokens("The Lambdas were 42 deploys"), vec!["lambda", "deploy"]);
         assert!(name_present("to-do", &["to".to_string()].into_iter().collect()) == false);
         assert!(name_present("aws", &["aws".to_string()].into_iter().collect()));
+        // short and common words count for tag names, but not as learned word features
+        let (words, feats) = features("Fix the UX for AI, then the new QA plan");
+        for w in ["ux", "ai", "qa", "new", "the"] {
+            assert!(words.contains(w), "{w} missing");
+        }
+        assert!(feats.iter().all(|f| f != "w:ux" && f != "w:the" && f != "w:new"));
+        assert!(name_present("ai", &words) && name_present("ux", &words) && name_present("new", &words));
+    }
+
+    #[test]
+    fn short_tag_names_are_suggested_by_name() {
+        let docs = vec![
+            doc(&["ai"], "AI model evaluation notes"),
+            doc(&["ai"], "Read the AI safety paper"),
+            doc(&["ai"], "Prompt ideas for the AI demo"),
+            doc(&["home"], "Buy milk and garden soil"),
+            doc(&["home"], "Call the plumber about the sink"),
+            doc(&["home"], "Paint the garage door"),
+        ];
+        let m = Model::train(&docs);
+        let s = m.suggest("Quarterly AI roadmap review", &[], &HashMap::new());
+        let ai = s.iter().find(|x| x.tag == "ai").expect("ai should be suggested from its name alone");
+        assert!(ai.why.iter().any(|w| w == "tag name"), "{:?}", ai.why);
+        assert!(s.iter().all(|x| x.tag != "home"));
     }
 
     #[test]

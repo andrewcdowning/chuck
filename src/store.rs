@@ -1,7 +1,7 @@
 //! Storage abstraction. The HTTP layer only talks to `NoteStore`, so a hosted
 //! deployment can add a Postgres/DynamoDB implementation without touching `api.rs`.
 
-use crate::tagging::Suggestion;
+use crate::tagging::SuggestionSet;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,7 +93,8 @@ pub trait NoteStore: Send + Sync + 'static {
     fn tags(&self, owner: &str) -> Result<Vec<TagCount>>;
     fn get(&self, owner: &str, id: i64) -> Result<Note>;
     /// Tags the user already has that fit `text`, best first, each with a calibrated confidence. Local, no external calls.
-    fn suggest_tags(&self, owner: &str, text: &str) -> Result<Vec<Suggestion>>;
+    /// The set also says how many tagged notes the model learned from, so an empty result can be explained.
+    fn suggest_tags(&self, owner: &str, text: &str) -> Result<SuggestionSet>;
     /// Logs that a suggestion was accepted or dismissed; this adjusts that tag's future confidence.
     fn record_suggestion_feedback(&self, owner: &str, tag: &str, accepted: bool, confidence: f64) -> Result<()>;
     fn rules(&self, owner: &str) -> Result<Vec<Rule>>;

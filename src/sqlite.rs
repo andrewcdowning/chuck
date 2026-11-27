@@ -1,5 +1,5 @@
 use crate::store::*;
-use crate::tagging::{feedback_offset, strip_hashtags, Doc, Model, Suggestion};
+use crate::tagging::{feedback_offset, strip_hashtags, Doc, Model, SuggestionSet, MIN_DOCS_TO_CALIBRATE};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -290,7 +290,7 @@ impl NoteStore for SqliteStore {
         Self::load(&conn, owner, id)
     }
 
-    fn suggest_tags(&self, owner: &str, text: &str) -> Result<Vec<Suggestion>> {
+    fn suggest_tags(&self, owner: &str, text: &str) -> Result<SuggestionSet> {
         let model = self.model(owner)?;
         let conn = self.conn.lock().unwrap();
         // Tags already written, or about to be added by a rule, are not suggestions.
@@ -303,7 +303,12 @@ impl NoteStore for SqliteStore {
                 Ok((r.get::<_, String>(0)?, feedback_offset(r.get::<_, i64>(1)?.max(0) as u32, r.get::<_, i64>(2)?.max(0) as u32)))
             })?
             .collect::<std::result::Result<_, _>>()?;
-        Ok(model.suggest(text, &taken, &offsets))
+        Ok(SuggestionSet {
+            suggestions: model.suggest(text, &taken, &offsets),
+            tagged_notes: model.docs,
+            calibrated: model.calibrated,
+            calibrate_at: MIN_DOCS_TO_CALIBRATE,
+        })
     }
 
     fn record_suggestion_feedback(&self, owner: &str, tag: &str, accepted: bool, confidence: f64) -> Result<()> {
@@ -491,16 +496,21 @@ mod tests {
         }
         s.create("other", &inp("lambda lambda lambda #secret")).unwrap();
 
-        let sug = s.suggest_tags("me", "investigate lambda deploy timeout").unwrap();
+        let set = s.suggest_tags("me", "investigate lambda deploy timeout").unwrap();
+        assert_eq!((set.tagged_notes, set.calibrated), (40, true));
+        let sug = set.suggestions;
         assert_eq!(sug[0].tag, "aws");
         assert!(sug[0].confidence >= 0.7 && sug[0].tier == "high", "{:?}", sug[0]);
         assert!(!sug[0].why.is_empty());
         assert!(sug.iter().all(|x| x.tag != "secret"));
         // written tags and rule-added tags are never suggested
-        assert!(s.suggest_tags("me", "lambda #aws").unwrap().iter().all(|x| x.tag != "aws"));
+        assert!(s.suggest_tags("me", "lambda #aws").unwrap().suggestions.iter().all(|x| x.tag != "aws"));
         s.add_rule("me", "lambda", "aws").unwrap();
-        assert!(s.suggest_tags("me", "lambda").unwrap().iter().all(|x| x.tag != "aws"));
-        assert!(s.suggest_tags("me", "zzz qqq").unwrap().is_empty());
+        assert!(s.suggest_tags("me", "lambda").unwrap().suggestions.iter().all(|x| x.tag != "aws"));
+        assert!(s.suggest_tags("me", "zzz qqq").unwrap().suggestions.is_empty());
+        // an owner with no tagged notes gets an empty set that says so
+        let none = s.suggest_tags("nobody", "anything at all").unwrap();
+        assert!(none.suggestions.is_empty() && none.tagged_notes == 0 && !none.calibrated);
 
         // dismissals lower a tag's confidence
         let s2 = SqliteStore::open(":memory:").unwrap();
@@ -508,17 +518,17 @@ mod tests {
             s2.create("me", &inp(&format!("Deploy the lambda stack to staging, bucket policy v{i} #aws"))).unwrap();
             s2.create("me", &inp(&format!("Buy milk and garden soil, plumber visit v{i} #home"))).unwrap();
         }
-        let before = s2.suggest_tags("me", "lambda bucket").unwrap()[0].confidence;
+        let before = s2.suggest_tags("me", "lambda bucket").unwrap().suggestions[0].confidence;
         for _ in 0..6 {
             s2.record_suggestion_feedback("me", "aws", false, 0.9).unwrap();
         }
-        let after = s2.suggest_tags("me", "lambda bucket").unwrap().iter().find(|x| x.tag == "aws").map_or(0.0, |x| x.confidence);
+        let after = s2.suggest_tags("me", "lambda bucket").unwrap().suggestions.iter().find(|x| x.tag == "aws").map_or(0.0, |x| x.confidence);
         assert!(after < before, "{after} !< {before}");
 
         // the cached model follows edits: a brand new tag becomes suggestable once notes use it
         for i in 0..4 {
             s2.create("me", &inp(&format!("Sourdough starter feeding schedule {i} #baking"))).unwrap();
         }
-        assert!(s2.suggest_tags("me", "feed the sourdough starter").unwrap().iter().any(|x| x.tag == "baking"));
+        assert!(s2.suggest_tags("me", "feed the sourdough starter").unwrap().suggestions.iter().any(|x| x.tag == "baking"));
     }
 }

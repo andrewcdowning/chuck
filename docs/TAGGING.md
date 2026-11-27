@@ -19,6 +19,10 @@ Chuck suggests tags you already use while you type. Everything runs locally from
 - **Small collections:** until there are 12 tagged notes with enough signal (roughly 30 usable training examples) the model is
   not calibrated and every confidence is capped at 60%, so nothing is labelled "high" on thin evidence.
 - **Why:** hover a chip to see the strongest evidence ("because of: lambda, deploy").
+- **Tag names:** a tag's own name in the text counts as evidence, including short or common names (`#ai`, `#ux`, `#qa`,
+  `#new`). How much it counts is learned from how often that word appears in notes with and without the tag.
+- **No suggestions:** the composer says why: no tagged notes yet, nothing matching among N tagged notes (and, before
+  calibration, that suggestions improve after about a dozen), or that you dismissed the rest.
 
 ## Feedback
 
