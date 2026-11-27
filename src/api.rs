@@ -27,6 +27,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tags", get(tags))
         .route("/api/export", get(export))
         .route("/api/suggest", post(suggest))
+        .route("/api/suggest/feedback", post(suggestion_feedback))
         .route("/api/rules", get(rules).post(add_rule))
         .route("/api/rules/apply", post(apply_rules))
         .route("/api/rules/:id", delete(delete_rule))
@@ -130,6 +131,28 @@ async fn suggest(State(s): State<AppState>, h: HeaderMap, Json(b): Json<SuggestI
     let text: String = b.text.chars().take(MAX_BODY).collect();
     let st = s.store.clone();
     Ok(Json(blocking(move || st.suggest_tags(&o, &text)).await?))
+}
+
+#[derive(Deserialize)]
+struct FeedbackInput {
+    tag: String,
+    /// "accepted" or "dismissed"
+    action: String,
+    confidence: Option<f64>,
+}
+
+async fn suggestion_feedback(State(s): State<AppState>, h: HeaderMap, Json(b): Json<FeedbackInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = owner(&s, &h).await?;
+    let tag = normalize_tag(&b.tag).ok_or(ApiError(StatusCode::BAD_REQUEST, "invalid tag".into()))?;
+    let accepted = match b.action.as_str() {
+        "accepted" => true,
+        "dismissed" => false,
+        _ => return Err(ApiError(StatusCode::BAD_REQUEST, "action must be accepted or dismissed".into())),
+    };
+    let confidence = b.confidence.filter(|c| c.is_finite()).unwrap_or(0.0);
+    let st = s.store.clone();
+    blocking(move || st.record_suggestion_feedback(&o, &tag, accepted, confidence)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn rules(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {

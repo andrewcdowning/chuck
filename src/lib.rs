@@ -3,9 +3,11 @@
 
 pub mod api;
 pub mod auth;
+pub mod cli;
 pub mod export;
 pub mod sqlite;
 pub mod store;
+pub mod tagging;
 
 use std::sync::Arc;
 

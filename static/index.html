@@ -117,6 +117,12 @@
   .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; border: var(--bw) solid var(--edge); background: var(--card); color: var(--tx); font: 500 12px var(--ui); cursor: pointer; }
   .chip::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); border: var(--bw) solid var(--edge); }
   .chip:hover { background: var(--accent); color: var(--accent-ink); }
+  .chip .pct { font: 500 10px var(--mono); opacity: .75; }
+  .chip.high { background: var(--accent); color: var(--accent-ink); border-color: var(--tx); }
+  .chipwrap { display: inline-flex; align-items: center; }
+  .chipwrap .chip { border-top-right-radius: 0; border-bottom-right-radius: 0; border-right: 0; }
+  .chipx { border: var(--bw) solid var(--edge); border-left: 0; border-radius: 0 999px 999px 0; background: var(--card); color: var(--mu); cursor: pointer; font-size: 13px; line-height: 1; padding: 3px 8px; }
+  .chipx:hover { color: var(--tx); }
   .autotags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; }
   details.rules { margin-top: 18px; }
   details.rules summary { cursor: pointer; font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .18em; color: var(--mu); }
@@ -603,24 +609,47 @@ function edit(card, n, compact) {
   ta.focus();
 }
 
-/* ---------- tag suggestions (local heuristics on the server) ---------- */
+/* ---------- tag suggestions ----------
+   The server returns calibrated confidences. Accepting (click) or dismissing (x) a suggestion is logged and
+   nudges that tag's future confidence. */
+function sendFeedback(tag, action, confidence) {
+  api("/api/suggest/feedback", { method: "POST", body: JSON.stringify({ tag, action, confidence }) }).catch(() => {});
+}
+// Explains an empty suggestion list, so silence does not look like a broken feature.
+function noSuggestionHint(res) {
+  const n = res.tagged_notes, notes = n === 1 ? "1 tagged note" : `${n} tagged notes`;
+  if (!n) return "No tag suggestions yet. Chuck suggests tags you have used before, so tag a few notes with #tags first.";
+  if (res.suggestions.length) return "No other tag suggestions.";
+  return `No matching tags from your ${notes}.` + (res.calibrated ? "" : ` Suggestions get more reliable after about ${res.calibrate_at}.`);
+}
 function attachSuggest(fields, target, box) {
   let timer, seq = 0;
+  const dismissed = new Set();
   const run = async () => {
     const text = fields.map(f => f.value).join("\n").trim();
     const mine = ++seq;
     if (text.length < 3) { box.replaceChildren(); return; }
-    let tags;
-    try { tags = await api("/api/suggest", { method: "POST", body: JSON.stringify({ text }) }); } catch { return; }
+    let res;
+    try { res = await api("/api/suggest", { method: "POST", body: JSON.stringify({ text }) }); } catch { return; }
     if (mine !== seq) return;
-    box.replaceChildren(...(tags.length ? [el("span", { className: "label", textContent: "Suggested" })] : []), ...tags.map(tg => {
-      const c = el("button", { className: "chip", type: "button", textContent: "#" + tg, onclick: () => {
-        const v = target.value.replace(/\s+$/, "");
-        target.value = v + (v ? " " : "") + "#" + tg + " ";
-        target.focus(); run();
-      } });
-      paint(c, tg);
-      return c;
+    const list = res.suggestions.filter(s => !dismissed.has(s.tag));
+    if (!list.length) { box.replaceChildren(el("span", { className: "hint", textContent: noSuggestionHint(res) })); return; }
+    box.replaceChildren(...(list.length ? [el("span", { className: "label", textContent: "Suggested" })] : []), ...list.map(s => {
+      const pctText = Math.round(s.confidence * 100) + "%";
+      const chip = el("button", { className: "chip" + (s.tier === "high" ? " high" : ""), type: "button",
+        title: `${pctText} likely` + (s.why.length ? ` because of: ${s.why.join(", ")}` : ""),
+        onclick: () => {
+          const v = target.value.replace(/\s+$/, "");
+          target.value = v + (v ? " " : "") + "#" + s.tag + " ";
+          sendFeedback(s.tag, "accepted", s.confidence);
+          target.focus(); run();
+        } }, "#" + s.tag, el("span", { className: "pct", textContent: pctText }));
+      paint(chip, s.tag);
+      const x = el("button", { className: "chipx", type: "button", textContent: "×", title: "Not relevant",
+        onclick: () => { dismissed.add(s.tag); sendFeedback(s.tag, "dismissed", s.confidence); run(); } });
+      const wrap = el("span", { className: "chipwrap" }, chip, x);
+      paint(wrap, s.tag);
+      return wrap;
     }));
   };
   fields.forEach(f => f.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(run, 350); }));

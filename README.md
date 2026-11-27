@@ -16,7 +16,7 @@ Everything is a card with a `kind`: `note`, `todo` (a card with `- [ ]` items, s
 - **Todos:** open todo cards stay at the top, soonest due date first, until every item is ticked. A todo card can have a due date; overdue and due-today cards are highlighted.
 - **Feed and Board:** the Feed is one column; the Board is a grid. Both show cards in creation order (open todos first) with each card's tags shown on it. There are no tag columns: pick a tag in the sidebar to see just those cards.
 - **Markdown:** card text renders headings (`#`), **bold**, *italic*, ~~strikethrough~~, `code` and fenced code blocks, lists, quotes, rules and links. Rendering builds DOM nodes with `textContent` only, so raw HTML in a note is shown as text, links must be http/https/mailto, and images are not loaded. Edit a card to see the raw text.
-- **Tag suggestions:** while you type, Chuck suggests tags you already use, from keyword co-occurrence in your own notes. Local only, no external calls.
+- **Tag suggestions:** while you type, Chuck suggests tags you already use, each with a calibrated confidence ("about this often right") learned from your own tagged notes. Accept or dismiss a suggestion to tune it. `chuck eval-tags` measures accuracy and calibration on your notes. Local only, no external calls. See [docs/TAGGING.md](docs/TAGGING.md).
 - **Auto-tag rules:** "if a note contains `jira` or `PR-`, add `#work`". Applied on save, and to existing notes on demand. See the sidebar panel.
 - **Export:** the **Export .md** button downloads one Markdown file, oldest first, with tags, due dates and reminders as metadata. It follows the active tag, search and date filters. API: `GET /api/export` (same filter parameters as `/api/notes`; paging is ignored).
 
