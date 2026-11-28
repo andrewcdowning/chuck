@@ -1,7 +1,8 @@
 use crate::auth::Authenticator;
 use crate::blob::{self, BlobStore};
 use crate::media::{self, MediaError};
-use crate::store::{normalize_tag, NewAttachment, NoteInput, NoteQuery, NoteStore, RuleInput, StoreError, User, REPEATS};
+use crate::store::{normalize_tag, NewAttachment, NoteInput, NoteQuery, NoteStore, RuleInput, StoreError, User};
+use crate::domain::input::{self, clean_name, InputError, MAX_BODY};
 use serde::Deserialize;
 use axum::{
     body::Bytes,
@@ -30,7 +31,6 @@ impl AppState {
     }
 }
 
-const MAX_BODY: usize = 20_000;
 
 /// Turns away anonymous requests to /api before any body or query is parsed, so a malformed request cannot learn
 /// anything (such as a 422 that shows which route exists) without signing in. Handlers still do the full check.
@@ -136,18 +136,11 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> crate::store::Result<T>
 
 /// `allow_empty`: a card may have no text when it holds media.
 fn validate(mut i: NoteInput, allow_empty: bool) -> Result<NoteInput, ApiError> {
-    i.body = i.body.trim().to_string();
-    if i.body.is_empty() && !allow_empty {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "body is empty".into()));
-    }
-    if i.body.len() > MAX_BODY {
-        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "note too long".into()));
-    }
-    if let Some(r) = &i.repeat {
-        if !r.is_empty() && !REPEATS.contains(&r.as_str()) {
-            return Err(ApiError(StatusCode::BAD_REQUEST, "invalid repeat".into()));
-        }
-    }
+    i.body = input::checked_body(&i.body, i.repeat.as_deref(), allow_empty).map_err(|e| match e {
+        InputError::EmptyBody => ApiError(StatusCode::BAD_REQUEST, "body is empty".into()),
+        InputError::BodyTooLong => ApiError(StatusCode::PAYLOAD_TOO_LARGE, "note too long".into()),
+        InputError::BadRepeat => ApiError(StatusCode::BAD_REQUEST, "invalid repeat".into()),
+    })?;
     Ok(i)
 }
 
@@ -329,15 +322,6 @@ fn collect_garbage(st: &dyn NoteStore, blobs: &dyn BlobStore, owner: &str, keys:
             Err(_) => eprintln!("could not check blob {k}"),
         }
     }
-}
-
-/// File names are display-only: keep the last path component, drop control characters, cap the length.
-fn clean_name(n: Option<String>) -> Option<String> {
-    let n = n?;
-    let base = n.rsplit(['/', '\\']).next().unwrap_or("");
-    let s: String = base.chars().filter(|c| !c.is_control()).take(200).collect();
-    let s = s.trim().to_string();
-    (!s.is_empty()).then_some(s)
 }
 
 #[derive(Deserialize)]

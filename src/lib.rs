@@ -6,6 +6,7 @@ pub mod auth;
 pub mod blob;
 pub mod cli;
 pub mod conformance;
+pub mod domain;
 pub mod export;
 pub mod media;
 pub mod sqlite;
