@@ -5,15 +5,15 @@
 //! `NoteService`. It is also a template for a real backend (a key-value or document store). Not for production: data is
 //! lost on exit, and each unit of work copies the whole state to stay atomic.
 //!
-//! `MemStore` offers the notes, tags, rules and attachments part of `NoteStore`. Suggestions and accounts belong to later
-//! phases of the service split, so those methods answer `Invalid("not supported")` here.
+//! `MemStore` offers everything in `NoteStore` except accounts, which belong to a later phase of the service split, so
+//! those methods answer `Invalid("not supported")` here.
 
 use crate::domain::order::Slot;
 use crate::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
 use crate::service::HasRecords;
 use crate::store::*;
-use crate::tagging::SuggestionSet;
-use std::collections::BTreeMap;
+use crate::tagmodel::{FeedbackCount, HasTagModel, ModelCache, TagModelService, TagSource};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 
 #[derive(Clone, Default)]
@@ -25,6 +25,8 @@ struct State {
     /// (owner, position within the card, attachment); the card is `attachment.note_id`
     attachments: BTreeMap<i64, (String, i64, Attachment)>,
     rules: BTreeMap<i64, (String, Rule)>,
+    versions: HashMap<String, u64>,
+    feedback: Vec<(String, FeedbackEvent)>,
 }
 
 #[derive(Default)]
@@ -40,6 +42,7 @@ impl MemRecords {
 
 struct MemTx<'a> {
     s: &'a mut State,
+    changed: HashSet<String>,
 }
 
 fn words(body: &str) -> Vec<String> {
@@ -78,6 +81,7 @@ impl RecordTx for MemTx<'_> {
         rec.attachments = vec![];
         rec.tags.sort();
         self.s.notes.insert(id, (owner.to_string(), rec));
+        self.changed.insert(owner.to_string());
         Ok(id)
     }
 
@@ -96,6 +100,7 @@ impl RecordTx for MemTx<'_> {
         rec.open_todos = n.open_todos;
         rec.tags = n.tags.clone();
         rec.tags.sort();
+        self.changed.insert(owner.to_string());
         Ok(())
     }
 
@@ -123,6 +128,7 @@ impl RecordTx for MemTx<'_> {
         }
         self.s.notes.remove(&id);
         self.s.attachments.retain(|_, (_, _, a)| a.note_id != id);
+        self.changed.insert(owner.to_string());
         Ok(true)
     }
 
@@ -266,11 +272,63 @@ impl NoteRecords for MemRecords {
     fn transact<T>(&self, f: impl FnOnce(&mut dyn RecordTx) -> Result<T>) -> Result<T> {
         let mut guard = self.state.lock().unwrap();
         let mut work = guard.clone();
-        let out = f(&mut MemTx { s: &mut work });
+        let mut tx = MemTx { s: &mut work, changed: HashSet::new() };
+        let out = f(&mut tx);
+        let changed = std::mem::take(&mut tx.changed);
         if out.is_ok() {
+            for owner in changed {
+                *work.versions.entry(owner).or_insert(0) += 1;
+            }
             *guard = work;
         }
         out
+    }
+}
+
+impl TagSource for MemRecords {
+    fn training_version(&self, owner: &str) -> Result<u64> {
+        Ok(self.state.lock().unwrap().versions.get(owner).copied().unwrap_or(0))
+    }
+
+    fn bodies(&self, owner: &str) -> Result<Vec<String>> {
+        Ok(self.state.lock().unwrap().notes.values().filter(|(o, _)| o == owner).map(|(_, r)| r.body.clone()).collect())
+    }
+
+    fn rule_pairs(&self, owner: &str) -> Result<Vec<(String, String)>> {
+        Ok(self.state.lock().unwrap().rules.values().filter(|(o, _)| o == owner).map(|(_, r)| (r.pattern.clone(), r.tag.clone())).collect())
+    }
+
+    fn feedback_counts(&self, owner: &str) -> Result<Vec<FeedbackCount>> {
+        let mut by_tag: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        for (o, e) in &self.state.lock().unwrap().feedback {
+            if o == owner {
+                let c = by_tag.entry(e.tag.clone()).or_default();
+                if e.action == "accepted" {
+                    c.0 += 1;
+                } else {
+                    c.1 += 1;
+                }
+            }
+        }
+        Ok(by_tag.into_iter().map(|(tag, (accepted, dismissed))| FeedbackCount { tag, accepted, dismissed }).collect())
+    }
+
+    fn record_feedback(&self, owner: &str, tag: &str, accepted: bool, confidence: f64, at: i64) -> Result<()> {
+        let action = if accepted { "accepted" } else { "dismissed" }.to_string();
+        self.state.lock().unwrap().feedback.push((owner.to_string(), FeedbackEvent { tag: tag.to_string(), action, confidence, created_at: at }));
+        Ok(())
+    }
+
+    fn feedback_events(&self, owner: &str) -> Result<Vec<FeedbackEvent>> {
+        Ok(self.state.lock().unwrap().feedback.iter().filter(|(o, _)| o == owner).map(|(_, e)| e.clone()).collect())
+    }
+
+    fn owners(&self) -> Result<Vec<(String, i64)>> {
+        let mut counts: BTreeMap<String, i64> = BTreeMap::new();
+        for (o, _) in self.state.lock().unwrap().notes.values() {
+            *counts.entry(o.clone()).or_default() += 1;
+        }
+        Ok(counts.into_iter().collect())
     }
 }
 
@@ -278,11 +336,18 @@ impl NoteRecords for MemRecords {
 #[derive(Default)]
 pub struct MemStore {
     records: MemRecords,
+    models: ModelCache,
 }
 
 impl MemStore {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+impl HasTagModel for MemStore {
+    fn tag_model(&self) -> TagModelService<'_> {
+        TagModelService::new(&self.records, &self.models)
     }
 }
 
@@ -299,13 +364,8 @@ fn unsupported<T>() -> Result<T> {
 
 impl NoteStore for MemStore {
     crate::note_service_methods!();
+    crate::tag_service_methods!();
 
-    fn suggest_tags(&self, _owner: &str, _text: &str) -> Result<SuggestionSet> {
-        unsupported()
-    }
-    fn record_suggestion_feedback(&self, _owner: &str, _tag: &str, _accepted: bool, _confidence: f64) -> Result<()> {
-        unsupported()
-    }
     fn touch_user(&self, _id: &str, _display_name: Option<&str>, _admin: bool) -> Result<User> {
         unsupported()
     }
@@ -316,9 +376,6 @@ impl NoteStore for MemStore {
         unsupported()
     }
     fn delete_user(&self, _id: &str) -> Result<Vec<String>> {
-        unsupported()
-    }
-    fn feedback_events(&self, _owner: &str) -> Result<Vec<FeedbackEvent>> {
         unsupported()
     }
 }

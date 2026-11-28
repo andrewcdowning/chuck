@@ -1,20 +1,18 @@
-use crate::domain::card::tags_for;
 use crate::domain::order::Slot;
 use crate::domain::schedule::Schedule;
 use crate::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
 use crate::store::*;
-use crate::tagging::{feedback_offset, strip_hashtags, Doc, Model, SuggestionSet, MIN_DOCS_TO_CALIBRATE};
+use crate::tagmodel::{FeedbackCount, HasTagModel, ModelCache, TagModelService, TagSource};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
-    /// Bumped whenever note text changes; cached tagging models are rebuilt when it moves.
-    generation: AtomicU64,
-    models: Mutex<HashMap<String, (u64, Arc<Model>)>>,
+    /// Per owner, bumped whenever the text of one of their cards changes (see `TagSource::training_version`).
+    versions: Mutex<HashMap<String, u64>>,
+    models: ModelCache,
 }
 
 fn now() -> i64 {
@@ -146,40 +144,7 @@ impl SqliteStore {
             }
         }
         conn.execute_batch("CREATE INDEX IF NOT EXISTS notes_owner_position ON notes(owner, position);")?;
-        Ok(Self { conn: Mutex::new(conn), generation: AtomicU64::new(0), models: Mutex::new(HashMap::new()) })
-    }
-
-    /// Notes that carry at least one tag the user wrote, with the hashtags stripped from the text.
-    /// Tags added by auto-tag rules are deliberately not labels.
-    pub fn training_docs(&self, owner: &str) -> Result<Vec<Doc>> {
-        let conn = self.conn.lock().unwrap();
-        let mut st = conn.prepare("SELECT body FROM notes WHERE owner=?1")?;
-        let bodies: Vec<String> = st.query_map([owner], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
-        Ok(bodies
-            .iter()
-            .map(|b| Doc { labels: extract_tags(b), text: strip_hashtags(b) })
-            .filter(|d| !d.labels.is_empty())
-            .collect())
-    }
-
-    /// Owners with notes in this database, and how many each.
-    pub fn owners(&self) -> Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
-        let mut st = conn.prepare("SELECT owner, COUNT(*) FROM notes GROUP BY owner ORDER BY owner")?;
-        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
-    }
-
-    fn model(&self, owner: &str) -> Result<Arc<Model>> {
-        let generation = self.generation.load(Ordering::Relaxed);
-        if let Some((g, m)) = self.models.lock().unwrap().get(owner) {
-            if *g == generation {
-                return Ok(m.clone());
-            }
-        }
-        let model = Arc::new(Model::train(&self.training_docs(owner)?));
-        self.models.lock().unwrap().insert(owner.to_string(), (generation, model.clone()));
-        Ok(model)
+        Ok(Self { conn: Mutex::new(conn), versions: Mutex::new(HashMap::new()), models: ModelCache::default() })
     }
 
     fn rule_pairs(conn: &Connection, owner: &str) -> Result<Vec<(String, String)>> {
@@ -216,10 +181,11 @@ fn fts_match(terms: &[String]) -> String {
     terms.iter().map(|w| format!("\"{w}\"*")).collect::<Vec<_>>().join(" ")
 }
 
-/// One SQL transaction. Writes that change card text set `dirty`, which invalidates cached tagging models on commit.
+/// One SQL transaction. Writes that change card text record the owner in `changed`, which moves that owner's
+/// `training_version` on commit.
 struct SqliteTx<'c> {
     tx: rusqlite::Transaction<'c>,
-    dirty: bool,
+    changed: HashSet<String>,
 }
 
 impl SqliteTx<'_> {
@@ -302,7 +268,7 @@ impl RecordTx for SqliteTx<'_> {
         let id = self.tx.last_insert_rowid();
         self.tx.execute("INSERT INTO notes_fts(rowid, body) VALUES(?1, ?2)", params![id, n.body])?;
         self.replace_tags(id, &n.tags)?;
-        self.dirty = true;
+        self.changed.insert(owner.to_string());
         Ok(id)
     }
 
@@ -321,7 +287,7 @@ impl RecordTx for SqliteTx<'_> {
         )?;
         self.tx.execute("UPDATE notes_fts SET body=?1 WHERE rowid=?2", params![n.body, n.id])?;
         self.replace_tags(n.id, &n.tags)?;
-        self.dirty = true;
+        self.changed.insert(owner.to_string());
         Ok(())
     }
 
@@ -343,7 +309,7 @@ impl RecordTx for SqliteTx<'_> {
             return Ok(false);
         }
         self.tx.execute("DELETE FROM notes_fts WHERE rowid=?1", [id])?; // tags and attachments follow by foreign key
-        self.dirty = true;
+        self.changed.insert(owner.to_string());
         Ok(true)
     }
 
@@ -485,15 +451,13 @@ impl crate::service::HasRecords for SqliteStore {
 impl NoteRecords for SqliteStore {
     fn transact<T>(&self, f: impl FnOnce(&mut dyn RecordTx) -> Result<T>) -> Result<T> {
         let mut conn = self.conn.lock().unwrap();
-        let mut t = SqliteTx { tx: conn.transaction()?, dirty: false };
+        let mut t = SqliteTx { tx: conn.transaction()?, changed: HashSet::new() };
         let out = f(&mut t);
-        let dirty = t.dirty;
+        let changed = std::mem::take(&mut t.changed);
         match out {
             Ok(v) => {
                 t.tx.commit()?;
-                if dirty {
-                    self.generation.fetch_add(1, Ordering::Relaxed);
-                }
+                self.bump_versions(changed);
                 Ok(v)
             }
             Err(e) => Err(e), // dropping the transaction rolls it back
@@ -501,38 +465,79 @@ impl NoteRecords for SqliteStore {
     }
 }
 
-impl NoteStore for SqliteStore {
-    crate::note_service_methods!();
+impl SqliteStore {
+    fn bump_versions(&self, owners: impl IntoIterator<Item = String>) {
+        let mut v = self.versions.lock().unwrap();
+        for o in owners {
+            *v.entry(o).or_insert(0) += 1;
+        }
+    }
+}
 
-    fn suggest_tags(&self, owner: &str, text: &str) -> Result<SuggestionSet> {
-        let model = self.model(owner)?;
-        let conn = self.conn.lock().unwrap();
-        // Tags already written, or about to be added by a rule, are not suggestions.
-        let taken = tags_for(&Self::rule_pairs(&conn, owner)?, text);
-        let mut st = conn.prepare(
-            "SELECT tag, SUM(action='accepted'), SUM(action='dismissed') FROM suggestion_events WHERE owner=?1 GROUP BY tag",
-        )?;
-        let offsets: HashMap<String, f64> = st
-            .query_map([owner], |r| {
-                Ok((r.get::<_, String>(0)?, feedback_offset(r.get::<_, i64>(1)?.max(0) as u32, r.get::<_, i64>(2)?.max(0) as u32)))
-            })?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(SuggestionSet {
-            suggestions: model.suggest(text, &taken, &offsets),
-            tagged_notes: model.docs,
-            calibrated: model.calibrated,
-            calibrate_at: MIN_DOCS_TO_CALIBRATE,
-        })
+impl TagSource for SqliteStore {
+    fn training_version(&self, owner: &str) -> Result<u64> {
+        Ok(self.versions.lock().unwrap().get(owner).copied().unwrap_or(0))
     }
 
-    fn record_suggestion_feedback(&self, owner: &str, tag: &str, accepted: bool, confidence: f64) -> Result<()> {
+    fn bodies(&self, owner: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare("SELECT body FROM notes WHERE owner=?1")?;
+        let rows = st.query_map([owner], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    fn rule_pairs(&self, owner: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        Self::rule_pairs(&conn, owner)
+    }
+
+    fn feedback_counts(&self, owner: &str) -> Result<Vec<FeedbackCount>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare("SELECT tag, SUM(action='accepted'), SUM(action='dismissed') FROM suggestion_events WHERE owner=?1 GROUP BY tag")?;
+        let rows = st
+            .query_map([owner], |r| {
+                Ok(FeedbackCount { tag: r.get(0)?, accepted: r.get::<_, i64>(1)?.max(0) as u32, dismissed: r.get::<_, i64>(2)?.max(0) as u32 })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    fn record_feedback(&self, owner: &str, tag: &str, accepted: bool, confidence: f64, at: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO suggestion_events(owner, tag, action, confidence, created_at) VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![owner, tag, if accepted { "accepted" } else { "dismissed" }, confidence.clamp(0.0, 1.0), now()],
+            params![owner, tag, if accepted { "accepted" } else { "dismissed" }, confidence, at],
         )?;
         Ok(())
     }
+
+    fn feedback_events(&self, owner: &str) -> Result<Vec<FeedbackEvent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare("SELECT tag, action, confidence, created_at FROM suggestion_events WHERE owner=?1 ORDER BY id")?;
+        let rows = st
+            .query_map([owner], |r| Ok(FeedbackEvent { tag: r.get(0)?, action: r.get(1)?, confidence: r.get(2)?, created_at: r.get(3)? }))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Owners with notes in this database, and how many each.
+    fn owners(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare("SELECT owner, COUNT(*) FROM notes GROUP BY owner ORDER BY owner")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+}
+
+impl HasTagModel for SqliteStore {
+    fn tag_model(&self) -> TagModelService<'_> {
+        TagModelService::new(self, &self.models)
+    }
+}
+
+impl NoteStore for SqliteStore {
+    crate::note_service_methods!();
+    crate::tag_service_methods!();
 
     fn touch_user(&self, id: &str, display_name: Option<&str>, admin: bool) -> Result<User> {
         let conn = self.conn.lock().unwrap();
@@ -616,18 +621,9 @@ impl NoteStore for SqliteStore {
         tx.execute("DELETE FROM suggestion_events WHERE owner=?1", [id])?;
         tx.execute("DELETE FROM users WHERE id=?1", [id])?;
         tx.commit()?;
-        self.models.lock().unwrap().remove(id);
-        self.generation.fetch_add(1, Ordering::Relaxed);
+        self.models.forget(id);
+        self.bump_versions([id.to_string()]);
         Ok(keys)
-    }
-
-    fn feedback_events(&self, owner: &str) -> Result<Vec<FeedbackEvent>> {
-        let conn = self.conn.lock().unwrap();
-        let mut st = conn.prepare("SELECT tag, action, confidence, created_at FROM suggestion_events WHERE owner=?1 ORDER BY id")?;
-        let rows = st
-            .query_map([owner], |r| Ok(FeedbackEvent { tag: r.get(0)?, action: r.get(1)?, confidence: r.get(2)?, created_at: r.get(3)? }))?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
     }
 
 }
