@@ -6,6 +6,54 @@
         "description": "The Chuck HTTP API. Every operation requires a signed-in user; how the user signs in (local, shared token, proxy\nheader, JWT) is decided by the deployment, so no authentication scheme is modelled here. Each user sees only their\nown data, administrators included. Error bodies are always `{\"error\": \"<message>\"}`."
     },
     "paths": {
+        "/api/admin/maintenance/sweep": {
+            "post": {
+                "description": "Deletes stored files that no card refers to and that have not been written for ten minutes (files of deleted cards and\nattachments, replaced previews, leftovers of interrupted uploads). Also runs on a schedule. Reports counts only.",
+                "operationId": "SweepOrphans",
+                "responses": {
+                    "200": {
+                        "description": "SweepOrphans 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SweepOrphansResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden 403 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ForbiddenResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/api/admin/users": {
             "get": {
                 "operationId": "ListUsers",
@@ -1932,6 +1980,33 @@
                     "calibrated",
                     "suggestions",
                     "tagged_notes"
+                ]
+            },
+            "SweepOrphansResponseContent": {
+                "type": "object",
+                "properties": {
+                    "scanned": {
+                        "type": "number",
+                        "description": "Files looked at."
+                    },
+                    "removed": {
+                        "type": "number",
+                        "description": "Unused files deleted."
+                    },
+                    "too_new": {
+                        "type": "number",
+                        "description": "Unused files left alone because they were written too recently."
+                    },
+                    "failed": {
+                        "type": "number",
+                        "description": "Files that could not be deleted; they are tried again next time."
+                    }
+                },
+                "required": [
+                    "failed",
+                    "removed",
+                    "scanned",
+                    "too_new"
                 ]
             },
             "TagCount": {

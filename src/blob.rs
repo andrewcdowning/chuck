@@ -8,8 +8,22 @@ use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// A stored file, as listed for maintenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobInfo {
+    pub key: String,
+    /// Unix seconds when the file was last written or re-stored.
+    pub modified: i64,
+}
+
 pub trait BlobStore: Send + Sync + 'static {
+    /// Stores the bytes under the key. Storing a key that already exists must still make its `modified` time current:
+    /// the orphan sweeper relies on it so that a file being attached again right now is never taken for abandoned.
     fn put(&self, key: &str, bytes: &[u8]) -> io::Result<()>;
+    /// Every file in the store, including leftovers of interrupted writes (their keys end in `.tmp<number>`).
+    fn list(&self) -> io::Result<Vec<BlobInfo>>;
+    /// When the file was last written or re-stored, or None if there is no such file.
+    fn modified(&self, key: &str) -> io::Result<Option<i64>>;
     fn get(&self, key: &str) -> io::Result<Vec<u8>>;
     /// Deleting a missing key is not an error.
     fn delete(&self, key: &str) -> io::Result<()>;
@@ -34,7 +48,16 @@ pub fn key_for(owner: &str, bytes: &[u8]) -> String {
 /// is refused before it can reach the filesystem.
 fn valid_key(key: &str) -> bool {
     let hex = |s: &str, n: usize| s.len() == n && s.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
-    matches!(key.split_once('/'), Some((a, b)) if hex(a, 32) && hex(b, 64))
+    // the second part may carry the `.tmp<number>` suffix of an interrupted write, so that such leftovers can be listed and removed
+    let content = |b: &str| match b.split_once(".tmp") {
+        Some((h, n)) => hex(h, 64) && !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()),
+        None => hex(b, 64),
+    };
+    matches!(key.split_once('/'), Some((a, b)) if hex(a, 32) && content(b))
+}
+
+fn unix(t: std::time::SystemTime) -> i64 {
+    t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 fn bad_key() -> io::Error {
@@ -71,7 +94,8 @@ impl BlobStore for FsBlobStore {
     fn put(&self, key: &str, bytes: &[u8]) -> io::Result<()> {
         let path = self.path(key)?;
         if path.exists() {
-            return Ok(()); // content-addressed: same key, same bytes
+            // content-addressed: same key, same bytes. Only the modified time changes (see the trait notes).
+            return std::fs::OpenOptions::new().write(true).open(&path)?.set_modified(std::time::SystemTime::now());
         }
         std::fs::create_dir_all(path.parent().unwrap())?;
         // Write to a temporary name, then rename, so a crash never leaves a half-written file under the real key.
@@ -82,6 +106,35 @@ impl BlobStore for FsBlobStore {
 
     fn get(&self, key: &str) -> io::Result<Vec<u8>> {
         std::fs::read(self.path(key)?)
+    }
+
+    fn list(&self) -> io::Result<Vec<BlobInfo>> {
+        let mut out = Vec::new();
+        for dir in std::fs::read_dir(&self.root)? {
+            let dir = dir?;
+            if !dir.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(owner) = dir.file_name().to_str().map(String::from) else { continue };
+            for f in std::fs::read_dir(dir.path())? {
+                let f = f?;
+                let Some(name) = f.file_name().to_str().map(String::from) else { continue };
+                let key = format!("{owner}/{name}");
+                if !f.file_type()?.is_file() || !valid_key(&key) {
+                    continue; // not ours: never listed, so never swept
+                }
+                out.push(BlobInfo { key, modified: unix(f.metadata()?.modified()?) });
+            }
+        }
+        Ok(out)
+    }
+
+    fn modified(&self, key: &str) -> io::Result<Option<i64>> {
+        match std::fs::metadata(self.path(key)?) {
+            Ok(m) => Ok(Some(unix(m.modified()?))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     fn delete(&self, key: &str) -> io::Result<()> {
@@ -121,7 +174,7 @@ mod tests {
 /// Keeps files in memory. For tests and as a template; everything is lost on exit.
 #[derive(Default)]
 pub struct MemBlobStore {
-    files: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    files: std::sync::Mutex<std::collections::HashMap<String, (Vec<u8>, i64)>>,
 }
 
 impl MemBlobStore {
@@ -136,16 +189,35 @@ impl MemBlobStore {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// For tests: pretend the file was last written at this time.
+    pub fn set_modified(&self, key: &str, unix_secs: i64) {
+        if let Some(f) = self.files.lock().unwrap().get_mut(key) {
+            f.1 = unix_secs;
+        }
+    }
+}
+
+fn now_secs() -> i64 {
+    unix(std::time::SystemTime::now())
 }
 
 impl BlobStore for MemBlobStore {
     fn put(&self, key: &str, bytes: &[u8]) -> io::Result<()> {
-        self.files.lock().unwrap().insert(key.to_string(), bytes.to_vec());
+        self.files.lock().unwrap().insert(key.to_string(), (bytes.to_vec(), now_secs()));
         Ok(())
     }
 
     fn get(&self, key: &str) -> io::Result<Vec<u8>> {
-        self.files.lock().unwrap().get(key).cloned().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
+        self.files.lock().unwrap().get(key).map(|f| f.0.clone()).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
+    }
+
+    fn list(&self) -> io::Result<Vec<BlobInfo>> {
+        Ok(self.files.lock().unwrap().iter().map(|(k, f)| BlobInfo { key: k.clone(), modified: f.1 }).collect())
+    }
+
+    fn modified(&self, key: &str) -> io::Result<Option<i64>> {
+        Ok(self.files.lock().unwrap().get(key).map(|f| f.1))
     }
 
     fn delete(&self, key: &str) -> io::Result<()> {

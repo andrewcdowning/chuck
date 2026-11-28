@@ -241,6 +241,15 @@ async fn admins_see_accounts_but_never_content() {
     assert_eq!(a.call("POST", "/api/admin/users/status", "bob", Some(json!({ "id": "alice", "active": false }))).await.0, StatusCode::FORBIDDEN);
     assert_eq!(a.call("POST", "/api/admin/users/delete", "bob", Some(json!({ "id": "alice" }))).await.0, StatusCode::FORBIDDEN);
     assert_eq!(a.json("GET", "/api/me", "alice", None).await.1["status"], "active", "alice still active after bob's attempts");
+    assert_eq!(a.call("POST", "/api/admin/maintenance/sweep", "bob", None).await.0, StatusCode::FORBIDDEN);
+    // a sweep reports counts only, and never touches files that cards still use
+    let files_before = a.files();
+    let (st, report) = a.json("POST", "/api/admin/maintenance/sweep", "root", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let mut fields: Vec<&str> = report.as_object().unwrap().keys().map(String::as_str).collect();
+    fields.sort();
+    assert_eq!(fields, vec!["failed", "removed", "scanned", "too_new"]);
+    assert_eq!((report["removed"].as_i64(), a.files()), (Some(0), files_before), "files that cards use are never swept");
 
     // the account list carries counts and sizes, and nothing else
     let r = a.call("GET", "/api/admin/users", "root", None).await;
@@ -366,6 +375,7 @@ async fn unauthenticated_requests_are_refused_everywhere() {
         ("GET", "/api/admin/users".to_string()),
         ("POST", "/api/admin/users/status".to_string()),
         ("POST", "/api/admin/users/delete".to_string()),
+        ("POST", "/api/admin/maintenance/sweep".to_string()),
     ] {
         let r = a.raw(method, &uri, None, &[("content-type", "application/json")], b"{}".to_vec()).await;
         assert_eq!(r.0, StatusCode::UNAUTHORIZED, "{method} {uri} answered without any identity");
@@ -403,6 +413,7 @@ fn every_route_has_an_isolation_test() {
         "/api/admin/users",
         "/api/admin/users/status",
         "/api/admin/users/delete",
+        "/api/admin/maintenance/sweep",
     ];
     let src = include_str!("../src/api.rs");
     let routes: Vec<&str> = src.split(".route(").skip(1).filter_map(|r| r.trim_start().strip_prefix('"')).map(|r| r.split('"').next().unwrap()).collect();

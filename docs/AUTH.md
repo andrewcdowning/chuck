@@ -37,6 +37,9 @@ account is being deleted"); then its files and records are erased; only then is 
 the account stays `deleting` in the administrator list, and deleting it again finishes the job. A `deleting` account
 cannot be enabled.
 
+Administrators can also run the file sweep on request (`POST /api/admin/maintenance/sweep`, counts only). The server
+runs it by itself every `CHUCK_SWEEP_MINUTES` minutes (default 10; 0 turns it off).
+
 Users can export everything they own (`GET /api/me/export`, a ZIP) and delete their own account (`DELETE /api/me` with
 `{"confirm": "<own id>"}`). A deleted account is erased completely; signing in again creates a new empty account, so to
 keep someone out, disable the account instead.

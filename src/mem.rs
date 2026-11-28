@@ -408,6 +408,14 @@ impl OwnerRecords for MemRecords {
         Ok(keys)
     }
 
+    fn all_blob_keys(&self) -> Result<Vec<String>> {
+        let st = self.state.lock().unwrap();
+        let mut keys: Vec<String> = st.attachments.values().flat_map(|(_, _, a)| std::iter::once(a.blob_key.clone()).chain(a.thumb_key.clone())).collect();
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
+    }
+
     fn purge_rows(&self, owner: &str) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         st.notes.retain(|_, (o, _)| o != owner);
@@ -464,6 +472,9 @@ impl OwnerRecords for MemStore {
     }
     fn blob_keys(&self, owner: &str) -> Result<Vec<String>> {
         self.records.blob_keys(owner)
+    }
+    fn all_blob_keys(&self) -> Result<Vec<String>> {
+        self.records.all_blob_keys()
     }
     fn purge_rows(&self, owner: &str) -> Result<()> {
         self.models.forget(owner);

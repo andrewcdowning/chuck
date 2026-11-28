@@ -16,17 +16,37 @@ pub struct SqliteStore {
     models: ModelCache,
 }
 
-fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+/// One step of the schema's history.
+pub type MigrationStep = fn(&Connection) -> Result<()>;
+
+/// The schema's history, in order. Step N takes a database from version N-1 to version N, which is recorded in SQLite's
+/// `user_version`. A released step is never edited: a schema change is a new step at the end. Each step runs in its own
+/// transaction together with the version bump, so a failure leaves the database at the previous version.
+pub const MIGRATIONS: &[(&str, MigrationStep)] = &[("baseline: the schema as it stood when versions were introduced", migrate_baseline)];
+
+/// Brings the database up to date. Refuses a database from a newer program instead of guessing.
+pub fn run_migrations(conn: &mut Connection, steps: &[(&str, MigrationStep)]) -> Result<()> {
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let latest = steps.len() as i64;
+    if current > latest {
+        return Err(StoreError::Other(format!(
+            "this database is at schema version {current}, but this version of chuck only knows versions up to {latest}; use a newer chuck"
+        )));
+    }
+    for (i, (name, step)) in steps.iter().enumerate().skip(current as usize) {
+        let tx = conn.transaction()?;
+        step(&tx).map_err(|e| StoreError::Other(format!("schema step {} ({name}) failed: {e:?}", i + 1)))?;
+        tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))?;
+        tx.commit()?;
+    }
+    Ok(())
 }
 
-impl SqliteStore {
-    pub fn open(path: &str) -> Result<Self> {
-        let conn = Connection::open(path)?;
+/// Everything that existed before versions were introduced. Written to be repeatable: databases from any earlier release
+/// (which carry no version) are brought up to the same shape, then stamped as version 1.
+fn migrate_baseline(conn: &Connection) -> Result<()> {
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA foreign_keys=ON;
-             CREATE TABLE IF NOT EXISTS notes(
+            "CREATE TABLE IF NOT EXISTS notes(
                id INTEGER PRIMARY KEY,
                owner TEXT NOT NULL,
                body TEXT NOT NULL,
@@ -119,8 +139,7 @@ impl SqliteStore {
         let users_sql: String = conn.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'", [], |r| r.get(0))?;
         if !users_sql.contains("'deleting'") {
             conn.execute_batch(
-                "BEGIN;
-                 CREATE TABLE users_new(
+                "CREATE TABLE users_new(
                    id TEXT PRIMARY KEY,
                    display_name TEXT,
                    role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),
@@ -129,8 +148,7 @@ impl SqliteStore {
                    last_seen_at INTEGER);
                  INSERT INTO users_new SELECT id, display_name, role, status, created_at, last_seen_at FROM users;
                  DROP TABLE users;
-                 ALTER TABLE users_new RENAME TO users;
-                 COMMIT;",
+                 ALTER TABLE users_new RENAME TO users;",
             )?;
         }
         conn.execute(
@@ -163,6 +181,18 @@ impl SqliteStore {
             }
         }
         conn.execute_batch("CREATE INDEX IF NOT EXISTS notes_owner_position ON notes(owner, position);")?;
+    Ok(())
+}
+
+fn now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+impl SqliteStore {
+    pub fn open(path: &str) -> Result<Self> {
+        let mut conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        run_migrations(&mut conn, MIGRATIONS)?;
         Ok(Self { conn: Mutex::new(conn), versions: Mutex::new(HashMap::new()), models: ModelCache::default() })
     }
 
@@ -610,6 +640,13 @@ impl OwnerRecords for SqliteStore {
         Ok(keys)
     }
 
+    fn all_blob_keys(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare("SELECT blob_key FROM attachments UNION SELECT thumb_key FROM attachments WHERE thumb_key IS NOT NULL")?;
+        let rows = st.query_map([], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     fn purge_rows(&self, owner: &str) -> Result<()> {
         {
             let conn = self.conn.lock().unwrap();
@@ -661,7 +698,7 @@ mod tests {
         // simulate a database from before manual ordering
         {
             let c = Connection::open(p).unwrap();
-            c.execute_batch("DROP INDEX notes_owner_position; ALTER TABLE notes DROP COLUMN position;").unwrap();
+            c.execute_batch("PRAGMA user_version=0; DROP INDEX notes_owner_position; ALTER TABLE notes DROP COLUMN position;").unwrap(); // an unversioned, older database
             // scramble creation times so only the old rule (todos by due date, then newest first) can explain the order
             c.execute("UPDATE notes SET created_at = id * 10", []).unwrap();
         }
@@ -685,7 +722,7 @@ mod tests {
         }
         {
             let c = Connection::open(p).unwrap();
-            c.execute_batch("DROP TABLE users;").unwrap(); // a database from before accounts existed
+            c.execute_batch("PRAGMA user_version=0; DROP TABLE users;").unwrap(); // an unversioned database from before accounts existed
         }
         let s = SqliteStore::open(p).unwrap();
         let ids: Vec<String> = s.list_accounts().unwrap().into_iter().map(|u| u.id).collect();

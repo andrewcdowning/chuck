@@ -1,6 +1,7 @@
 //! Chuck as a library. The `chuck` binary is a thin wrapper over `run`. To plug in your own authentication
 //! (or storage) without forking, depend on this crate and write your own `main`; see `examples/custom_auth.rs`.
 
+pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod blob;
@@ -36,6 +37,8 @@ pub struct Options {
     /// How long a signed-in account is reused before its record is read again (`CHUCK_ACCOUNT_CACHE_SECS`, default 30).
     /// Disabling an account takes effect at once in this process and within this time anywhere else.
     pub account_cache: std::time::Duration,
+    /// How often unused files are deleted (`CHUCK_SWEEP_MINUTES`, default 10; 0 turns the scheduled sweep off).
+    pub sweep_interval: Option<std::time::Duration>,
     pub providers: auth::Providers,
 }
 
@@ -51,6 +54,11 @@ impl Options {
             media_dir: std::env::var("CHUCK_MEDIA_DIR").ok().filter(|v| !v.is_empty()),
             admins: std::env::var("CHUCK_ADMINS").unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
             account_cache: std::env::var("CHUCK_ACCOUNT_CACHE_SECS").ok().and_then(|v| v.trim().parse().ok()).map(std::time::Duration::from_secs).unwrap_or(control::DEFAULT_ACCOUNT_CACHE),
+            sweep_interval: match std::env::var("CHUCK_SWEEP_MINUTES").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+                Some(0) => None,
+                Some(m) => Some(std::time::Duration::from_secs(m * 60)),
+                None => Some(std::time::Duration::from_secs(600)),
+            },
             providers: auth::Providers::default(),
         }
     }
@@ -114,8 +122,29 @@ pub async fn run(opts: Options) -> Result<(), String> {
         eprintln!("note: no administrators configured (CHUCK_ADMINS); nobody can manage accounts");
     }
     let state = api::AppState::new(store, cfg.auth, blobs).with_admins(admins).with_account_cache(opts.account_cache);
+    if let Some(every) = opts.sweep_interval {
+        spawn_sweeper(state.admin.clone(), every);
+    }
     let app = api::router(state);
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("bind {addr}: {e}"))?;
     println!("chuck listening on http://{addr} (auth: {})", cfg.names.join(","));
     axum::serve(listener, app).await.map_err(|e| e.to_string())
+}
+
+/// Deletes unused files now and then, for as long as the server runs. The first pass waits a little so that start-up is
+/// not slowed down.
+fn spawn_sweeper(admin: Arc<admin::AdminService>, every: std::time::Duration) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30).min(every)).await;
+        loop {
+            let a = admin.clone();
+            match tokio::task::spawn_blocking(move || a.sweep_unattended(admin::SWEEP_GRACE_SECS)).await {
+                Ok(Ok(r)) if r.removed > 0 || r.failed > 0 => println!("swept unused files: {} removed, {} failed", r.removed, r.failed),
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => eprintln!("sweeping unused files failed: {e:?}"),
+                Err(e) => eprintln!("sweeping unused files failed: {e}"),
+            }
+            tokio::time::sleep(every).await;
+        }
+    });
 }
