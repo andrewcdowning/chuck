@@ -44,6 +44,16 @@
                             }
                         }
                     },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
+                                }
+                            }
+                        }
+                    },
                     "500": {
                         "description": "InternalError 500 response",
                         "content": {
@@ -160,6 +170,18 @@
             },
             "BadRequestResponseContent": {
                 "type": "object",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
+                ]
+            },
+            "ConflictResponseContent": {
+                "type": "object",
+                "description": "The data changed meanwhile (for example the card was removed while saving), or the account is in a state that forbids the\naction. Look again and retry.",
                 "properties": {
                     "error": {
                         "type": "string"

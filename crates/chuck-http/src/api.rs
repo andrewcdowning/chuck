@@ -202,6 +202,7 @@ impl From<StoreError> for ApiError {
         match e {
             StoreError::NotFound => ApiError(StatusCode::NOT_FOUND, "not found".into()),
             StoreError::Invalid(m) => ApiError(StatusCode::BAD_REQUEST, m),
+            StoreError::Conflict(m) => ApiError(StatusCode::CONFLICT, m),
             StoreError::Other(m) => {
                 eprintln!("store error: {m}");
                 ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())

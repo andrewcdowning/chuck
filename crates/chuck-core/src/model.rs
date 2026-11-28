@@ -140,12 +140,52 @@ pub enum StoreError {
     NotFound,
     /// The request does not make sense (for example moving a card across the open-todo group).
     Invalid(String),
+    /// The request was fine but the data it touches is not in the state it needs: someone else changed or removed it
+    /// meanwhile (a unique or foreign-key constraint refused the write), or the account is in a state that forbids the
+    /// action. The caller may look again and retry. The message is safe to show.
+    Conflict(String),
+    /// Anything else: a fault of the storage, not of the request. Logged, and reported only as "internal error".
     Other(String),
+}
+
+/// What a database error means for the caller. Constraint violations that say "this collides with what is stored now"
+/// are conflicts; everything else (a full disk, a locked or corrupt file, a CHECK or NOT NULL violation, which would be a
+/// bug) stays `Other`. Matches the text SQLite gives for its constraint errors, because an error from another crate
+/// cannot be inspected any other way from here; the SQLite backend pins the wording with tests against real errors.
+/// A backend whose errors carry codes should return `StoreError::Conflict` itself.
+pub fn classify_database_error(message: &str) -> StoreError {
+    const COLLISIONS: [&str; 3] = ["UNIQUE constraint failed", "PRIMARY KEY constraint failed", "FOREIGN KEY constraint failed"];
+    if COLLISIONS.iter().any(|c| message.contains(c)) {
+        StoreError::Conflict("the data changed while saving; look again and retry".into())
+    } else {
+        StoreError::Other(message.to_string())
+    }
 }
 
 impl<E: std::error::Error> From<E> for StoreError {
     fn from(e: E) -> Self {
-        StoreError::Other(e.to_string())
+        classify_database_error(&e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collisions_are_conflicts_and_faults_are_not() {
+        for m in [
+            "UNIQUE constraint failed: users.id",
+            "PRIMARY KEY constraint failed",
+            "FOREIGN KEY constraint failed",
+        ] {
+            assert!(matches!(classify_database_error(m), StoreError::Conflict(_)), "{m}");
+        }
+        for m in ["disk I/O error", "database is locked", "CHECK constraint failed: role", "NOT NULL constraint failed: notes.body", "no such table: x"] {
+            assert!(matches!(classify_database_error(m), StoreError::Other(_)), "{m}");
+        }
+        let StoreError::Conflict(m) = classify_database_error("UNIQUE constraint failed: tag_rules.pattern") else { panic!() };
+        assert!(!m.contains("tag_rules"), "table and column names are not shown to callers");
     }
 }
 

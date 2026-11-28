@@ -116,7 +116,7 @@ fn a_failed_delete_leaves_a_deleting_account_that_can_be_finished() {
     assert!(svc.delete("carol").is_err());
     assert_eq!(svc.get("carol").unwrap().status, "deleting", "the account stays, marked deleting");
     assert_eq!(svc.resolve(&ident("carol")).unwrap().status, AccountStatus::Deleting, "and is refused meanwhile");
-    assert!(matches!(svc.set_active("carol", true), Err(StoreError::Invalid(_))), "it cannot be re-enabled half way");
+    assert!(matches!(svc.set_active("carol", true), Err(StoreError::Conflict(_))), "it cannot be re-enabled half way");
     assert_eq!(store.list("carol", &Default::default()).unwrap().len(), 1, "nothing was lost by the failure");
 
     flaky.broken.store(false, Ordering::SeqCst);
@@ -218,6 +218,9 @@ async fn the_admin_screen_shows_deleting_accounts_and_deleting_finishes_them() {
     store.set_account_status("ann", "deleting").unwrap(); // as left by a delete that failed half way
     let (_, list) = send(&router, "GET", "/api/admin/users", "root", "").await;
     assert!(list.contains("\"status\":\"deleting\"") && list.contains("\"notes\":1"), "{list}");
+    // enabling it half way is a conflict with its state, reported as 409
+    let (s, m) = send(&router, "POST", "/api/admin/users/status", "root", r#"{"id":"ann","active":true}"#).await;
+    assert_eq!((s, m.contains("being deleted")), (StatusCode::CONFLICT, true), "{m}");
     let (s, _) = send(&router, "POST", "/api/admin/users/delete", "root", r#"{"id":"ann"}"#).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     let (_, list) = send(&router, "GET", "/api/admin/users", "root", "").await;

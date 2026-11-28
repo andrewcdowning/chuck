@@ -77,5 +77,5 @@ operation DeleteMe {
         confirm: String
     }
     output := {}
-    errors: [BadRequest, Unauthorized, InternalError]
+    errors: [BadRequest, Unauthorized, Conflict, InternalError]
 }

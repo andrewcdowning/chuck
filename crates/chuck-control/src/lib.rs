@@ -257,7 +257,7 @@ impl AccountService {
     pub fn set_active(&self, id: &str, active: bool) -> Result<User> {
         let cur = self.get(id)?;
         if AccountStatus::parse(&cur.status) == AccountStatus::Deleting {
-            return Err(StoreError::Invalid("this account is being deleted".into()));
+            return Err(StoreError::Conflict("this account is being deleted".into()));
         }
         self.accounts.set_account_status(id, if active { "active" } else { "disabled" })?;
         self.forget(id);

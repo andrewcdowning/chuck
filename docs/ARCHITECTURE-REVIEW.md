@@ -14,7 +14,7 @@ README).
 | A4 `NoteStore` too big | Partly (PR #25): accounts and admin are separate traits. Cards, rules, attachments and suggestions are still one trait |
 | A5 per-request work | Fixed (PR #25): one authentication per request, account cached for 30 seconds |
 | A6 ad-hoc migrations | Fixed (phase 5): numbered steps in `PRAGMA user_version` |
-| A7 blanket error conversion | Open |
+| A7 blanket error conversion | Fixed: collisions with stored data (unique, primary key, foreign key) are `StoreError::Conflict`, reported as 409; faults stay internal errors. It recognises SQLite's wording, pinned by tests against real errors |
 | A8 minor items | Open |
 | B1 rules inside `sqlite.rs` | Fixed (PRs #22, #23): `domain` and `NoteService` |
 | B2 ordering and paging are SQL tricks | Open: positions are still floats (decision D2) |
