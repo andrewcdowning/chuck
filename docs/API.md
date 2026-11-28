@@ -13,9 +13,8 @@ The server is still hand-written axum code in `src/api.rs`; the model is the wri
 
 ## Known gaps in the model
 
-- `GET /api/notes`, `/api/tags`, `/api/rules` and `/api/admin/users` return a bare JSON array. Smithy cannot bind an array
-  to the response body, so these are typed as a free-form `document` and the element type appears only in the description.
-  Wrapping the arrays in objects (for example `{"notes": [...]}`) would fix this but changes the API and the page.
+List endpoints return objects (`{"notes": [...]}`, `{"tags": [...]}`, `{"rules": [...]}`, `{"users": [...]}`) because Smithy cannot bind a bare array to a body.
+
 - `DELETE /api/me` takes a JSON body, which Smithy flags as unusual for DELETE. The warning is suppressed on purpose.
 
 ## Toward API Gateway and Lambda

@@ -127,6 +127,7 @@ async fn upload_strips_metadata_and_serves_safely() {
     // the card now reports its attachment and kind
     let (_, _, list) = a.call("GET", "/api/notes", Some("alice"), vec![], false).await;
     let list: serde_json::Value = serde_json::from_slice(&list).unwrap();
+    let list = &list["notes"];
     assert_eq!(list[0]["kind"], "media");
     assert_eq!(list[0]["attachments"].as_array().unwrap().len(), 1);
 
@@ -219,7 +220,7 @@ async fn move_endpoint_checks_owner_and_groups() {
     let (u, b) = mv(x, None, Some(y));
     assert_eq!(a.call("POST", &u, Some("alice"), b, true).await.0, StatusCode::OK);
     let (_, _, list) = a.call("GET", "/api/notes", Some("alice"), vec![], false).await;
-    let order: Vec<i64> = serde_json::from_slice::<serde_json::Value>(&list).unwrap().as_array().unwrap().iter().map(|n| n["id"].as_i64().unwrap()).collect();
+    let order: Vec<i64> = serde_json::from_slice::<serde_json::Value>(&list).unwrap()["notes"].as_array().unwrap().iter().map(|n| n["id"].as_i64().unwrap()).collect();
     assert_eq!(order, vec![t, x, y]);
     let (u, b) = mv(x, Some(t), None);
     assert_eq!(a.call("POST", &u, Some("alice"), b, true).await.0, StatusCode::BAD_REQUEST, "cannot cross the open-todo group");
