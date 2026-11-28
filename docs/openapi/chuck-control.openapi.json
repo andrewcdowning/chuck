@@ -1,0 +1,261 @@
+{
+    "openapi": "3.0.2",
+    "info": {
+        "title": "ChuckControl",
+        "version": "2025-01-01",
+        "description": "The control plane, as a user sees it: their own account. Reading it, exporting everything they own, and deleting it.\nDeleting is a command: the account is marked `deleting` (refused everywhere), its data is erased, then the account is\nremoved."
+    },
+    "paths": {
+        "/api/me": {
+            "delete": {
+                "description": "Permanently erases the caller's account, notes, files and rules. Signing in again starts a new, empty account.",
+                "operationId": "DeleteMe",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/DeleteMeRequestContent"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "204": {
+                        "description": "DeleteMe 204 response"
+                    },
+                    "400": {
+                        "description": "BadRequest 400 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BadRequestResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "get": {
+                "operationId": "GetMe",
+                "responses": {
+                    "200": {
+                        "description": "GetMe 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/User"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/me/export": {
+            "get": {
+                "description": "Everything the caller owns as one ZIP: notes (JSON and Markdown), rules, suggestion feedback and original files.\nFails with 413 when the files total more than 1 GB.",
+                "operationId": "ExportMe",
+                "responses": {
+                    "200": {
+                        "description": "ExportMe 200 response",
+                        "headers": {
+                            "Content-Disposition": {
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "content": {
+                            "application/zip": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ExportMeOutputPayload"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "413": {
+                        "description": "TooLarge 413 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/TooLargeResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "schemas": {
+            "AccountStatus": {
+                "type": "string",
+                "enum": [
+                    "active",
+                    "disabled",
+                    "deleting"
+                ]
+            },
+            "BadRequestResponseContent": {
+                "type": "object",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
+                ]
+            },
+            "DeleteMeRequestContent": {
+                "type": "object",
+                "properties": {
+                    "confirm": {
+                        "type": "string",
+                        "description": "Must equal the account id."
+                    }
+                },
+                "required": [
+                    "confirm"
+                ]
+            },
+            "ExportMeOutputPayload": {
+                "type": "string",
+                "format": "byte"
+            },
+            "InternalErrorResponseContent": {
+                "type": "object",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
+                ]
+            },
+            "Role": {
+                "type": "string",
+                "enum": [
+                    "user",
+                    "admin"
+                ]
+            },
+            "TooLargeResponseContent": {
+                "type": "object",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
+                ]
+            },
+            "UnauthorizedResponseContent": {
+                "type": "object",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
+                ]
+            },
+            "User": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string"
+                    },
+                    "display_name": {
+                        "type": "string"
+                    },
+                    "role": {
+                        "$ref": "#/components/schemas/Role"
+                    },
+                    "status": {
+                        "$ref": "#/components/schemas/AccountStatus"
+                    },
+                    "created_at": {
+                        "type": "number",
+                        "description": "Unix seconds."
+                    },
+                    "last_seen_at": {
+                        "type": "number",
+                        "description": "Unix seconds."
+                    }
+                },
+                "required": [
+                    "created_at",
+                    "id",
+                    "role",
+                    "status"
+                ]
+            }
+        }
+    }
+}

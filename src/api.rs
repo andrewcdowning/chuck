@@ -107,19 +107,26 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Principal {
     }
 }
 
-pub fn router(state: AppState) -> Router {
+/// The three planes of the API (see docs/specs/service-layer.md). Each has its own routes and its own Smithy service, so a
+/// host can serve any combination: everything in one process, or one function per plane behind a gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Plane {
+    /// A user's cards, tags, rules, files and tag suggestions. Smithy service `ChuckData`.
+    Data,
+    /// A user's own account. Smithy service `ChuckControl`.
+    Control,
+    /// Administrators: accounts and maintenance. Smithy service `ChuckAdmin`.
+    Admin,
+}
+
+pub const ALL_PLANES: [Plane; 3] = [Plane::Data, Plane::Control, Plane::Admin];
+
+/// `ChuckData`.
+pub fn data_routes() -> Router<AppState> {
     Router::new()
-        .route("/", get(|| async { Html(include_str!("../static/index.html")) }))
-        .route("/healthz", get(|| async { "ok" }))
         .route("/api/notes", get(list).post(create))
         .route("/api/notes/:id", put(update).delete(remove))
         .route("/api/notes/:id/move", post(move_note))
-        .route("/api/me", get(me).delete(delete_me))
-        .route("/api/me/export", get(export_me))
-        .route("/api/admin/users", get(admin_users))
-        .route("/api/admin/users/status", post(admin_user_status))
-        .route("/api/admin/users/delete", post(admin_delete_user))
-        .route("/api/admin/maintenance/sweep", post(admin_sweep))
         .route("/api/tags", get(tags))
         .route("/api/export", get(export))
         .route("/api/suggest", post(suggest))
@@ -133,8 +140,39 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/media/:id", get(get_media).delete(delete_media))
         .route("/api/media/:id/thumb", put(put_thumb).layer(DefaultBodyLimit::max(media::MAX_THUMB_BYTES + 1024)))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), require_principal))
-        .with_state(state)
+}
+
+/// `ChuckControl`.
+pub fn control_routes() -> Router<AppState> {
+    Router::new().route("/api/me", get(me).delete(delete_me)).route("/api/me/export", get(export_me))
+}
+
+/// `ChuckAdmin`.
+pub fn admin_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/admin/users", get(admin_users))
+        .route("/api/admin/users/status", post(admin_user_status))
+        .route("/api/admin/users/delete", post(admin_delete_user))
+        .route("/api/admin/maintenance/sweep", post(admin_sweep))
+}
+
+/// All three planes in one router.
+pub fn router(state: AppState) -> Router {
+    router_for(state, &ALL_PLANES)
+}
+
+/// Only the given planes. The page and `/healthz` are always served (they carry no data). Requests for another plane's
+/// paths are 404. Authentication and account checks apply the same way whichever planes are served.
+pub fn router_for(state: AppState, planes: &[Plane]) -> Router {
+    let mut r = Router::new().route("/", get(|| async { Html(include_str!("../static/index.html")) })).route("/healthz", get(|| async { "ok" }));
+    for plane in planes {
+        r = r.merge(match plane {
+            Plane::Data => data_routes(),
+            Plane::Control => control_routes(),
+            Plane::Admin => admin_routes(),
+        });
+    }
+    r.layer(axum::middleware::from_fn_with_state(state.clone(), require_principal)).with_state(state)
 }
 
 pub struct ApiError(StatusCode, String);

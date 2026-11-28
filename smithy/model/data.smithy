@@ -4,11 +4,11 @@ namespace chuck.api
 
 use aws.protocols#restJson1
 
-/// The Chuck HTTP API. Every operation requires a signed-in user; how the user signs in (local, shared token, proxy
-/// header, JWT) is decided by the deployment, so no authentication scheme is modelled here. Each user sees only their
-/// own data, administrators included. Error bodies are always `{"error": "<message>"}`.
+/// The data plane: a user's own cards, tags, rules, files and tag suggestions. Every operation requires a signed-in user;
+/// how the user signs in (local, shared token, proxy header, JWT) is decided by the deployment, so no authentication
+/// scheme is modelled here. Each user sees only their own data, administrators included.
 @restJson1
-service Chuck {
+service ChuckData {
     version: "2025-01-01"
     operations: [
         ListNotes
@@ -28,64 +28,8 @@ service Chuck {
         GetMedia
         DeleteMedia
         PutThumb
-        GetMe
-        DeleteMe
-        ExportMe
-        ListUsers
-        SetUserStatus
-        DeleteUser
-        SweepOrphans
     ]
 }
-
-// ---------- errors ----------
-
-@error("client")
-@httpError(400)
-structure BadRequest {
-    @required
-    error: String
-}
-
-@error("client")
-@httpError(401)
-structure Unauthorized {
-    @required
-    error: String
-}
-
-@error("client")
-@httpError(403)
-structure Forbidden {
-    @required
-    error: String
-}
-
-@error("client")
-@httpError(404)
-structure NotFound {
-    @required
-    error: String
-}
-
-@error("client")
-@httpError(413)
-structure TooLarge {
-    @required
-    error: String
-}
-
-@error("server")
-@httpError(500)
-structure InternalError {
-    @required
-    error: String
-}
-
-// ---------- shapes ----------
-
-/// Unix seconds.
-long Timestamp
 
 long NoteId
 
@@ -105,10 +49,6 @@ enum Repeat {
     WEEKDAYS = "weekdays"
     WEEKLY = "weekly"
     MONTHLY = "monthly"
-}
-
-list StringList {
-    member: String
 }
 
 structure Attachment {
@@ -243,72 +183,6 @@ structure Rule {
 list RuleList {
     member: Rule
 }
-
-enum Role {
-    USER = "user"
-    ADMIN = "admin"
-}
-
-enum AccountStatus {
-    ACTIVE = "active"
-    DISABLED = "disabled"
-
-    /// Being erased after a delete request; refused on every endpoint. Deleting it again finishes the job.
-    DELETING = "deleting"
-}
-
-structure User {
-    @required
-    id: String
-
-    display_name: String
-
-    @required
-    role: Role
-
-    @required
-    status: AccountStatus
-
-    @required
-    created_at: Timestamp
-
-    last_seen_at: Timestamp
-}
-
-/// What an administrator sees about an account: counts and sizes, never content.
-structure UserSummary {
-    @required
-    id: String
-
-    display_name: String
-
-    @required
-    role: Role
-
-    @required
-    status: AccountStatus
-
-    @required
-    created_at: Timestamp
-
-    last_seen_at: Timestamp
-
-    @required
-    notes: Long
-
-    @required
-    attachments: Long
-
-    /// Total size of the account's stored files (previews not counted).
-    @required
-    storage_bytes: Long
-}
-
-list UserSummaryList {
-    member: UserSummary
-}
-
-// ---------- notes ----------
 
 /// Newest first; open todos come first. Supports full-text search, a tag, a date range and paging.
 @readonly
@@ -463,8 +337,6 @@ operation ListTags {
     errors: [Unauthorized, InternalError]
 }
 
-// ---------- tag suggestions and rules ----------
-
 structure SuggestionSet {
     @required
     suggestions: SuggestionList
@@ -566,8 +438,6 @@ operation ApplyRules {
     }
     errors: [Unauthorized, InternalError]
 }
-
-// ---------- files ----------
 
 @mediaType("application/octet-stream")
 blob FileBytes
@@ -675,118 +545,4 @@ operation PutThumb {
     }
     output := {}
     errors: [BadRequest, Unauthorized, NotFound, TooLarge, InternalError]
-}
-
-// ---------- the signed-in account ----------
-
-@readonly
-@http(method: "GET", uri: "/api/me")
-operation GetMe {
-    output := {
-        @httpPayload
-        @required
-        user: User
-    }
-    errors: [Unauthorized, InternalError]
-}
-
-@mediaType("application/zip")
-@streaming
-blob ZipStream
-
-/// Everything the caller owns as one ZIP: notes (JSON and Markdown), rules, suggestion feedback and original files.
-/// Fails with 413 when the files total more than 1 GB.
-@readonly
-@http(method: "GET", uri: "/api/me/export")
-operation ExportMe {
-    output := {
-        @httpHeader("Content-Disposition")
-        contentDisposition: String
-
-        @httpPayload
-        @required
-        archive: ZipStream
-    }
-    errors: [Unauthorized, TooLarge, InternalError]
-}
-
-/// Permanently erases the caller's account, notes, files and rules. Signing in again starts a new, empty account.
-@suppress(["HttpMethodSemantics.UnexpectedPayload"])
-@idempotent
-@http(method: "DELETE", uri: "/api/me", code: 204)
-operation DeleteMe {
-    input := {
-        /// Must equal the account id.
-        @required
-        confirm: String
-    }
-    output := {}
-    errors: [BadRequest, Unauthorized, InternalError]
-}
-
-// ---------- administration (accounts only, never content) ----------
-
-@readonly
-@http(method: "GET", uri: "/api/admin/users")
-operation ListUsers {
-    output := {
-        @required
-        users: UserSummaryList
-    }
-    errors: [Unauthorized, Forbidden, InternalError]
-}
-
-/// Disables or enables an account. A disabled account is refused on every endpoint. Not allowed on your own account.
-/// Ids are sent in the body because they may contain slashes.
-@http(method: "POST", uri: "/api/admin/users/status")
-operation SetUserStatus {
-    input := {
-        @required
-        id: String
-
-        @required
-        active: Boolean
-    }
-    output := {
-        @httpPayload
-        @required
-        user: User
-    }
-    errors: [BadRequest, Unauthorized, Forbidden, NotFound, InternalError]
-}
-
-/// Deletes another account and everything it owns. To keep someone out without deleting, disable the account.
-@idempotent
-@http(method: "POST", uri: "/api/admin/users/delete", code: 204)
-operation DeleteUser {
-    input := {
-        @required
-        id: String
-    }
-    output := {}
-    errors: [BadRequest, Unauthorized, Forbidden, NotFound, InternalError]
-}
-
-/// Deletes stored files that no card refers to and that have not been written for ten minutes (files of deleted cards and
-/// attachments, replaced previews, leftovers of interrupted uploads). Also runs on a schedule. Reports counts only.
-@http(method: "POST", uri: "/api/admin/maintenance/sweep")
-operation SweepOrphans {
-    output := {
-        /// Files looked at.
-        @required
-        scanned: Integer
-
-        /// Unused files deleted.
-        @required
-        removed: Integer
-
-        /// Unused files left alone because they were written too recently.
-        @required
-        too_new: Integer
-
-        /// Files that could not be deleted; they are tried again next time.
-        @required
-        failed: Integer
-    }
-    errors: [Unauthorized, Forbidden, InternalError]
 }
