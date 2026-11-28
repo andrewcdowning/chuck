@@ -104,3 +104,25 @@ fn storage_keys_stay_in_the_data_plane() {
         }
     }
 }
+
+/// A panicking request must not poison a lock for everyone after it: locks are taken with `chuck_core::sync::lock`, which
+/// recovers them, never with `lock().unwrap()`.
+#[test]
+fn locks_are_taken_with_the_recovering_helper() {
+    fn scan(dir: &std::path::Path, bad: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                scan(&p, bad);
+            } else if p.extension().is_some_and(|x| x == "rs") && std::fs::read_to_string(&p).unwrap().contains(".lock().unwrap()") {
+                bad.push(p.display().to_string());
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut bad = Vec::new();
+    for d in ["crates", "src"] {
+        scan(&root.join(d), &mut bad);
+    }
+    assert!(bad.is_empty(), "use chuck_core::sync::lock instead of lock().unwrap() in: {bad:?}");
+}

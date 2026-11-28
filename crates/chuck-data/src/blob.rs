@@ -204,7 +204,7 @@ impl MemBlobStore {
     }
 
     pub fn len(&self) -> usize {
-        self.files.lock().unwrap().len()
+        chuck_core::sync::lock(&self.files).len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -213,7 +213,7 @@ impl MemBlobStore {
 
     /// For tests: pretend the file was last written at this time.
     pub fn set_modified(&self, key: &str, unix_secs: i64) {
-        if let Some(f) = self.files.lock().unwrap().get_mut(key) {
+        if let Some(f) = chuck_core::sync::lock(&self.files).get_mut(key) {
             f.1 = unix_secs;
         }
     }
@@ -225,24 +225,24 @@ fn now_secs() -> i64 {
 
 impl BlobStore for MemBlobStore {
     fn put(&self, key: &str, bytes: &[u8]) -> io::Result<()> {
-        self.files.lock().unwrap().insert(key.to_string(), (bytes.to_vec(), now_secs()));
+        chuck_core::sync::lock(&self.files).insert(key.to_string(), (bytes.to_vec(), now_secs()));
         Ok(())
     }
 
     fn get(&self, key: &str) -> io::Result<Vec<u8>> {
-        self.files.lock().unwrap().get(key).map(|f| f.0.clone()).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
+        chuck_core::sync::lock(&self.files).get(key).map(|f| f.0.clone()).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
     }
 
     fn list(&self) -> io::Result<Vec<BlobInfo>> {
-        Ok(self.files.lock().unwrap().iter().map(|(k, f)| BlobInfo { key: k.clone(), modified: f.1 }).collect())
+        Ok(chuck_core::sync::lock(&self.files).iter().map(|(k, f)| BlobInfo { key: k.clone(), modified: f.1 }).collect())
     }
 
     fn modified(&self, key: &str) -> io::Result<Option<i64>> {
-        Ok(self.files.lock().unwrap().get(key).map(|f| f.1))
+        Ok(chuck_core::sync::lock(&self.files).get(key).map(|f| f.1))
     }
 
     fn delete(&self, key: &str) -> io::Result<()> {
-        self.files.lock().unwrap().remove(key);
+        chuck_core::sync::lock(&self.files).remove(key);
         Ok(())
     }
 }

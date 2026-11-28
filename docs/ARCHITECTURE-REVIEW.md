@@ -15,7 +15,7 @@ README).
 | A5 per-request work | Fixed (PR #25): one authentication per request, account cached for 30 seconds |
 | A6 ad-hoc migrations | Fixed (phase 5): numbered steps in `PRAGMA user_version` |
 | A7 blanket error conversion | Fixed: collisions with stored data (unique, primary key, foreign key) are `StoreError::Conflict`, reported as 409; faults stay internal errors. It recognises SQLite's wording, pinned by tests against real errors |
-| A8 minor items | Open |
+| A8 minor items | Partly. Fixed: a panic while holding a lock no longer breaks every later request (locks recover; a panic in a request was already contained as a 500, and the unfinished SQL work is rolled back); the single 1,550-line page is now `index.html` plus a stylesheet and eleven scripts, each starting with a line saying what it holds. Open, and needing a decision: reminders fire only in an open tab (a product choice: push or email), and the account export is built in memory (streaming or pre-signed URLs, to settle with the Lambda host). The scripts are still plain scripts sharing one scope, not modules |
 | B1 rules inside `sqlite.rs` | Fixed (PRs #22, #23): `domain` and `NoteService` |
 | B2 ordering and paging are SQL tricks | Partly (D2 done): positions are text keys that sort in any store, with room between any two, so moving a card writes only that card. Paging is still offset-based |
 | B3 search contract | Fixed (PR #21): stated and tested for every backend |

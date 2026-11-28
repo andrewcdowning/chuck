@@ -380,10 +380,21 @@ async fn unauthenticated_requests_are_refused_everywhere() {
         let r = a.raw(method, &uri, None, &[("content-type", "application/json")], b"{}".to_vec()).await;
         assert_eq!(r.0, StatusCode::UNAUTHORIZED, "{method} {uri} answered without any identity");
     }
-    // only the page itself and the health check are public, and neither carries data
+    // only the page, its own files and the health check are public, and none carries data
     let (s, _, page) = a.raw("GET", "/", None, &[], vec![]).await;
     assert_eq!(s, StatusCode::OK);
     assert!(!String::from_utf8_lossy(&page).contains(MARK));
+    for name in ["app.css", "helpers.js", "cards.js", "app.js"] {
+        let (s, h, body) = a.raw("GET", &format!("/assets/{name}"), None, &[], vec![]).await;
+        assert_eq!(s, StatusCode::OK, "{name}");
+        assert!(!String::from_utf8_lossy(&body).contains(MARK));
+        assert!(h["content-type"].to_str().unwrap().starts_with(if name.ends_with(".css") { "text/css" } else { "text/javascript" }), "{name}");
+        assert_eq!(h["x-content-type-options"], "nosniff");
+    }
+    for name in ["nope.js", "..%2FCargo.toml", "index.html"] {
+        assert_eq!(a.raw("GET", &format!("/assets/{name}"), None, &[], vec![]).await.0, StatusCode::NOT_FOUND, "{name}");
+    }
+    assert_eq!(a.raw("POST", "/assets/app.js", None, &[], vec![]).await.0, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(a.raw("GET", "/healthz", None, &[], vec![]).await.0, StatusCode::OK);
     std::fs::remove_dir_all(&a.media).ok();
 }
@@ -395,6 +406,7 @@ fn every_route_has_an_isolation_test() {
     const COVERED: &[&str] = &[
         "/",
         "/healthz",
+        "/assets/:name",
         "/api/notes",
         "/api/notes/:id",
         "/api/notes/:id/move",

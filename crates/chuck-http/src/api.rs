@@ -169,7 +169,10 @@ pub fn router(state: AppState) -> Router {
 /// Only the given planes. The page and `/healthz` are always served (they carry no data). Requests for another plane's
 /// paths are 404. Authentication and account checks apply the same way whichever planes are served.
 pub fn router_for(state: AppState, planes: &[Plane]) -> Router {
-    let mut r = Router::new().route("/", get(|| async { Html(include_str!("../static/index.html")) })).route("/healthz", get(|| async { "ok" }));
+    let mut r = Router::new()
+        .route("/", get(|| async { Html(crate::assets::INDEX) }))
+        .route("/assets/:name", get(asset))
+        .route("/healthz", get(|| async { "ok" }));
     for plane in planes {
         r = r.merge(match plane {
             Plane::Data => data_routes(),
@@ -178,6 +181,22 @@ pub fn router_for(state: AppState, planes: &[Plane]) -> Router {
         });
     }
     r.layer(axum::middleware::from_fn_with_state(state.clone(), require_principal)).with_state(state)
+}
+
+/// One of the page's own files (see `assets`). Public, like the page; unknown names are 404.
+async fn asset(Path(name): Path<String>) -> Response {
+    match crate::assets::find(&name) {
+        Some(a) => (
+            [
+                (header::CONTENT_TYPE, a.content_type),
+                (header::CACHE_CONTROL, "no-cache"),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            a.body,
+        )
+            .into_response(),
+        None => ApiError(StatusCode::NOT_FOUND, "not found".into()).into_response(),
+    }
 }
 
 pub struct ApiError(StatusCode, String);

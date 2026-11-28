@@ -163,13 +163,13 @@ impl RemoteKeys {
 
 impl KeySource for RemoteKeys {
     fn key(&self, kid: &str) -> Option<DecodingKey> {
-        if let Some((k, at)) = self.cache.lock().unwrap().get(kid) {
+        if let Some((k, at)) = chuck_core::sync::lock(&self.cache).get(kid) {
             if at.elapsed() < KEY_TTL {
                 return Some(k.clone());
             }
         }
         {
-            let mut last = self.last_fetch.lock().unwrap();
+            let mut last = chuck_core::sync::lock(&self.last_fetch);
             if last.map_or(false, |t| t.elapsed() < MIN_FETCH_GAP) {
                 return None;
             }
@@ -179,12 +179,12 @@ impl KeySource for RemoteKeys {
             Mode::PemPerKid(tpl) => {
                 let pem = self.get(&tpl.replace("{kid}", kid))?;
                 let key = DecodingKey::from_ec_pem(pem.as_bytes()).or_else(|_| DecodingKey::from_rsa_pem(pem.as_bytes())).ok()?;
-                self.cache.lock().unwrap().insert(kid.to_string(), (key.clone(), Instant::now()));
+                chuck_core::sync::lock(&self.cache).insert(kid.to_string(), (key.clone(), Instant::now()));
                 Some(key)
             }
             Mode::Jwks(url) => {
                 let set: JwkSet = serde_json::from_str(&self.get(url)?).ok()?;
-                let mut cache = self.cache.lock().unwrap();
+                let mut cache = chuck_core::sync::lock(&self.cache);
                 for jwk in &set.keys {
                     if let (Some(id), Ok(k)) = (&jwk.common.key_id, DecodingKey::from_jwk(jwk)) {
                         cache.insert(id.clone(), (k, Instant::now()));

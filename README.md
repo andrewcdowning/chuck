@@ -44,7 +44,7 @@ A Cargo workspace; the top-level `chuck` package is the binary and re-exports th
 | `crates/chuck-control` | Control plane: accounts, `Principal`, the account cache, deletion as a command |
 | `crates/chuck-mgmt` | Management plane: administration and the unused-file sweeper |
 | `crates/chuck-store-sqlite` | The SQLite backend, with numbered schema migrations |
-| `crates/chuck-http` | The HTTP edge: routers per plane, authentication providers, the page |
+| `crates/chuck-http` | The HTTP edge: routers per plane, authentication providers, the page (`static/`: `index.html`, one stylesheet, scripts loaded in order) |
 | `crates/chuck-testkit` | Conformance suite and in-memory backend, for tests |
 
 `cargo test` runs every crate's tests.
