@@ -19,7 +19,7 @@ README).
 | B1 rules inside `sqlite.rs` | Fixed (PRs #22, #23): `domain` and `NoteService` |
 | B2 ordering and paging are SQL tricks | Partly (D2 done): positions are text keys that sort in any store, with room between any two, so moving a card writes only that card. Paging is still offset-based |
 | B3 search contract | Fixed (PR #21): stated and tested for every backend |
-| B4 ids are rowids | Open (decision D1) |
+| B4 ids are rowids | Fixed (D1): ids of cards, files and rules are 26-character text ids made by the service, never reused, sorting in creation order; the stale-picture class of bug cannot recur. Breaking change for API clients (see docs/API.md) |
 | B5 tag model welded to the store | Fixed (PR #24) |
 | B6 storage keys in the domain | Open |
 | B7 transaction assumptions | Fixed (PR #23): `transact` |

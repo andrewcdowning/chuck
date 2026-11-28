@@ -16,7 +16,8 @@ use crate::store::{Attachment, NewAttachment, Result, Rule, TagCount};
 /// A card as stored. `open_todos` and `position` are what ordering needs; the service computes and maintains them.
 #[derive(Debug, Clone)]
 pub struct NoteRecord {
-    pub id: i64,
+    /// Chosen by the service (`ids::new_id`); a backend stores it as given and never makes ids of its own.
+    pub id: String,
     pub body: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -53,45 +54,44 @@ pub struct RecordQuery {
 
 /// Operations inside one unit of work.
 pub trait RecordTx {
-    /// Stores a new card and returns its id. `n.id` is ignored. Tags in `n.tags` are stored with it; `attachments` is
-    /// ignored.
-    fn insert_note(&mut self, owner: &str, n: &NoteRecord) -> Result<i64>;
+    /// Stores a new card under `n.id`. Tags in `n.tags` are stored with it; `attachments` is ignored.
+    fn insert_note(&mut self, owner: &str, n: &NoteRecord) -> Result<()>;
     /// One card with its tags and attachments, or None.
-    fn get_note(&mut self, owner: &str, id: i64) -> Result<Option<NoteRecord>>;
+    fn get_note(&mut self, owner: &str, id: &str) -> Result<Option<NoteRecord>>;
     /// Replaces body, `updated_at`, schedule, `open_todos` and tags. Position, creation time and attachments are kept.
     /// NotFound if the card is not the owner's.
     fn update_note(&mut self, owner: &str, n: &NoteRecord) -> Result<()>;
     /// Replaces only the tags. NotFound if the card is not the owner's.
-    fn set_tags(&mut self, owner: &str, id: i64, tags: &[String]) -> Result<()>;
+    fn set_tags(&mut self, owner: &str, id: &str, tags: &[String]) -> Result<()>;
     /// Sets `updated_at` only.
-    fn touch_note(&mut self, owner: &str, id: i64, updated_at: i64) -> Result<()>;
+    fn touch_note(&mut self, owner: &str, id: &str, updated_at: i64) -> Result<()>;
     /// Removes the card with its tags and attachments. False if it was not the owner's.
-    fn delete_note(&mut self, owner: &str, id: i64) -> Result<bool>;
+    fn delete_note(&mut self, owner: &str, id: &str) -> Result<bool>;
     /// Cards matching the query, with tags and attachments, in the order described on `RecordQuery`. Backends should
     /// load tags and attachments for the whole page at once.
     fn query_notes(&mut self, owner: &str, q: &RecordQuery) -> Result<Vec<NoteRecord>>;
     /// Position data for one card.
-    fn slot(&mut self, owner: &str, id: i64) -> Result<Option<Slot>>;
+    fn slot(&mut self, owner: &str, id: &str) -> Result<Option<Slot>>;
     /// Position data for all of the owner's cards, in display order, with ids.
-    fn slots(&mut self, owner: &str) -> Result<Vec<(i64, Slot)>>;
+    fn slots(&mut self, owner: &str) -> Result<Vec<(String, Slot)>>;
     /// Sets one card's position. Nothing else changes: positions never need renumbering.
-    fn set_position(&mut self, owner: &str, id: i64, position: &str) -> Result<()>;
+    fn set_position(&mut self, owner: &str, id: &str, position: &str) -> Result<()>;
     /// Tag names with how many cards use each: most used first, then by name.
     fn tag_counts(&mut self, owner: &str) -> Result<Vec<TagCount>>;
 
     /// In creation order.
     fn rules(&mut self, owner: &str) -> Result<Vec<Rule>>;
-    fn insert_rule(&mut self, owner: &str, pattern: &str, tag: &str, created_at: i64) -> Result<Rule>;
+    fn insert_rule(&mut self, owner: &str, id: &str, pattern: &str, tag: &str, created_at: i64) -> Result<Rule>;
     /// False if it was not the owner's.
-    fn delete_rule(&mut self, owner: &str, id: i64) -> Result<bool>;
+    fn delete_rule(&mut self, owner: &str, id: &str) -> Result<bool>;
 
-    fn count_attachments(&mut self, owner: &str, note_id: i64) -> Result<i64>;
+    fn count_attachments(&mut self, owner: &str, note_id: &str) -> Result<i64>;
     /// Appends to the card's attachments (display order is insertion order). The card must be the owner's.
-    fn insert_attachment(&mut self, owner: &str, note_id: i64, a: &NewAttachment, created_at: i64) -> Result<Attachment>;
-    fn get_attachment(&mut self, owner: &str, id: i64) -> Result<Option<Attachment>>;
+    fn insert_attachment(&mut self, owner: &str, id: &str, note_id: &str, a: &NewAttachment, created_at: i64) -> Result<Attachment>;
+    fn get_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>>;
     /// Sets the preview key and returns the previous one. NotFound if the attachment is not the owner's.
-    fn set_thumb(&mut self, owner: &str, id: i64, thumb_key: &str) -> Result<Option<String>>;
-    fn delete_attachment(&mut self, owner: &str, id: i64) -> Result<Option<Attachment>>;
+    fn set_thumb(&mut self, owner: &str, id: &str, thumb_key: &str) -> Result<Option<String>>;
+    fn delete_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>>;
     /// True if any of the owner's attachments uses this storage key as a file or a preview.
     fn blob_referenced(&mut self, owner: &str, key: &str) -> Result<bool>;
 }

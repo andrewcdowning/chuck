@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Note {
-    pub id: i64,
+    /// Opaque text (see `domain::id`).
+    pub id: String,
     /// Card kind, derived from content: "reminder", "todo" (has checklist items), "media" (has attachments) or "note".
     pub kind: &'static str,
     pub body: String,
@@ -26,8 +27,8 @@ pub struct Note {
 /// A file attached to a note. The storage keys are never sent to clients; files are served by id after an owner check.
 #[derive(Debug, Clone, Serialize)]
 pub struct Attachment {
-    pub id: i64,
-    pub note_id: i64,
+    pub id: String,
+    pub note_id: String,
     /// Detected from the file's bytes.
     pub mime: String,
     pub bytes: i64,
@@ -123,7 +124,7 @@ pub struct FeedbackEvent {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Rule {
-    pub id: i64,
+    pub id: String,
     /// Keywords separated by `|` or `,`; the rule fires if any appears (case-insensitive substring).
     pub pattern: String,
     pub tag: String,

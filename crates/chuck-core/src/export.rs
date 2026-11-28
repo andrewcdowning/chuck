@@ -41,7 +41,7 @@ pub fn fmt_date(secs: i64) -> String {
 pub fn to_markdown(notes: &[Note], now_secs: i64) -> String {
     let mut out = format!("# Chuck export\n\nExported {} · {} notes\n", fmt_utc(now_secs), notes.len());
     let mut ordered: Vec<&Note> = notes.iter().collect();
-    ordered.sort_by_key(|n| (n.created_at, n.id));
+    ordered.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
     for n in ordered {
         out.push_str(&format!("\n---\n\n## {}\n\n", fmt_utc(n.created_at)));
         let mut meta = Vec::new();
@@ -85,7 +85,7 @@ mod tests {
 
     fn note(id: i64, body: &str, created: i64) -> Note {
         Note {
-            id,
+            id: id.to_string(),
             kind: "note",
             body: body.into(),
             tags: vec![],

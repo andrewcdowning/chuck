@@ -50,7 +50,7 @@ impl App {
         (s, serde_json::from_slice(&b).unwrap_or_default())
     }
 
-    async fn attach(&self, user: &str, note: i64, bytes: Vec<u8>, name: &str) -> (StatusCode, serde_json::Value) {
+    async fn attach(&self, user: &str, note: &str, bytes: Vec<u8>, name: &str) -> (StatusCode, serde_json::Value) {
         let uri = format!("/api/notes/{note}/attachments?name={name}");
         let (s, _, b) = self.call("POST", &uri, Some(user), bytes, false).await;
         (s, serde_json::from_slice(&b).unwrap_or_default())
@@ -106,16 +106,16 @@ async fn upload_strips_metadata_and_serves_safely() {
     let a = app("serve");
     let (s, card) = a.new_card("alice", "", true).await;
     assert_eq!(s, StatusCode::CREATED);
-    let id = card["id"].as_i64().unwrap();
+    let id = card["id"].as_str().unwrap().to_string();
     assert_eq!(a.new_card("alice", "", false).await.0, StatusCode::BAD_REQUEST, "empty card needs the media flag");
 
-    let (s, att) = a.attach("alice", id, jpeg(1), "..%2F..%2Fholiday.jpg").await;
+    let (s, att) = a.attach("alice", &id, jpeg(1), "..%2F..%2Fholiday.jpg").await;
     assert_eq!(s, StatusCode::CREATED, "{att}");
     assert_eq!((att["mime"].as_str(), att["width"].as_i64(), att["height"].as_i64()), (Some("image/jpeg"), Some(800), Some(300)));
     assert_eq!(att["name"], "holiday.jpg", "path components are dropped from names");
     assert!(att.get("blob_key").is_none(), "storage keys are never sent to clients");
 
-    let aid = att["id"].as_i64().unwrap();
+    let aid = att["id"].as_str().unwrap().to_string();
     let (s, h, body) = a.call("GET", &format!("/api/media/{aid}"), Some("alice"), vec![], false).await;
     assert_eq!(s, StatusCode::OK);
     assert!(!body.windows(11).any(|w| w == b"GPSLatitude"), "GPS must be stripped before storage");
@@ -144,26 +144,26 @@ async fn upload_strips_metadata_and_serves_safely() {
 #[tokio::test]
 async fn rejects_what_is_not_an_allowed_image() {
     let a = app("reject");
-    let id = a.new_card("alice", "x", false).await.1["id"].as_i64().unwrap();
+    let id = a.new_card("alice", "x", false).await.1["id"].as_str().unwrap().to_string();
     let svg = b"<svg xmlns='http://www.w3.org/2000/svg' onload='alert(1)'/>".to_vec();
-    assert_eq!(a.attach("alice", id, svg, "x.jpg").await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE, "type comes from bytes, not the name");
-    assert_eq!(a.attach("alice", id, b"%PDF-1.7".to_vec(), "a.pdf").await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
-    assert_eq!(a.attach("alice", id, jpeg(1)[..40].to_vec(), "cut.jpg").await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(a.attach("alice", &id, svg, "x.jpg").await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE, "type comes from bytes, not the name");
+    assert_eq!(a.attach("alice", &id, b"%PDF-1.7".to_vec(), "a.pdf").await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(a.attach("alice", &id, jpeg(1)[..40].to_vec(), "cut.jpg").await.0, StatusCode::BAD_REQUEST);
     // a JPEG over the 20 MB image limit, and any body over the 25 MB upload limit
     let mut big_jpeg = jpeg(1);
     big_jpeg.resize(chuck::media::MAX_IMAGE_BYTES + 4096, 0);
-    assert_eq!(a.attach("alice", id, big_jpeg, "big.jpg").await.0, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(a.attach("alice", &id, big_jpeg, "big.jpg").await.0, StatusCode::PAYLOAD_TOO_LARGE);
     let huge = vec![0u8; chuck::media::MAX_UPLOAD_BYTES + 4096];
-    assert_eq!(a.attach("alice", id, huge, "huge.bin").await.0, StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(a.attach("alice", 999_999, jpeg(1), "x.jpg").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(a.attach("alice", &id, huge, "huge.bin").await.0, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(a.attach("alice", "7ZZZZZZZZZZZZZZZZZZZZZZZZZ", jpeg(1), "x.jpg").await.0, StatusCode::NOT_FOUND);
     assert_eq!(a.files(), 0, "nothing rejected is stored");
 }
 
 #[tokio::test]
 async fn users_cannot_touch_each_others_media() {
     let a = app("isolation");
-    let id = a.new_card("alice", "alice's", false).await.1["id"].as_i64().unwrap();
-    let aid = a.attach("alice", id, jpeg(1), "a.jpg").await.1["id"].as_i64().unwrap();
+    let id = a.new_card("alice", "alice's", false).await.1["id"].as_str().unwrap().to_string();
+    let aid = a.attach("alice", &id, jpeg(1), "a.jpg").await.1["id"].as_str().unwrap().to_string();
     let m = format!("/api/media/{aid}");
     for (method, uri, body) in [
         ("GET", m.clone(), vec![]),
@@ -184,12 +184,12 @@ async fn users_cannot_touch_each_others_media() {
 #[tokio::test]
 async fn files_dedupe_per_user_and_are_cleaned_up() {
     let a = app("gc");
-    let c1 = a.new_card("alice", "one", false).await.1["id"].as_i64().unwrap();
-    let c2 = a.new_card("alice", "two", false).await.1["id"].as_i64().unwrap();
-    let cb = a.new_card("bob", "bob", false).await.1["id"].as_i64().unwrap();
-    let a1 = a.attach("alice", c1, jpeg(1), "a.jpg").await.1["id"].as_i64().unwrap();
-    a.attach("alice", c2, jpeg(1), "same.jpg").await;
-    a.attach("bob", cb, jpeg(1), "same.jpg").await;
+    let c1 = a.new_card("alice", "one", false).await.1["id"].as_str().unwrap().to_string();
+    let c2 = a.new_card("alice", "two", false).await.1["id"].as_str().unwrap().to_string();
+    let cb = a.new_card("bob", "bob", false).await.1["id"].as_str().unwrap().to_string();
+    let a1 = a.attach("alice", &c1, jpeg(1), "a.jpg").await.1["id"].as_str().unwrap().to_string();
+    a.attach("alice", &c2, jpeg(1), "same.jpg").await;
+    a.attach("bob", &cb, jpeg(1), "same.jpg").await;
     assert_eq!(a.files(), 2, "same file twice for alice is stored once; bob gets his own copy");
 
     // removing one of alice's two uses keeps the file; removing the last use leaves it for the sweeper
@@ -206,12 +206,12 @@ async fn files_dedupe_per_user_and_are_cleaned_up() {
     assert_eq!(a.files(), 1, "only bob's copy remains");
 
     // a media card may lose its text, a plain card may not
-    let c3 = a.new_card("alice", "caption", false).await.1["id"].as_i64().unwrap();
-    let put = |id: i64| (format!("/api/notes/{id}"), serde_json::json!({ "body": "" }).to_string().into_bytes());
-    let (u, b) = put(c3);
+    let c3 = a.new_card("alice", "caption", false).await.1["id"].as_str().unwrap().to_string();
+    let put = |id: &str| (format!("/api/notes/{id}"), serde_json::json!({ "body": "" }).to_string().into_bytes());
+    let (u, b) = put(&c3);
     assert_eq!(a.call("PUT", &u, Some("alice"), b, true).await.0, StatusCode::BAD_REQUEST);
-    a.attach("alice", c3, jpeg(3), "p.jpg").await;
-    let (u, b) = put(c3);
+    a.attach("alice", &c3, jpeg(3), "p.jpg").await;
+    let (u, b) = put(&c3);
     assert_eq!(a.call("PUT", &u, Some("alice"), b, true).await.0, StatusCode::OK);
     std::fs::remove_dir_all(&a.media).ok();
 }
@@ -219,22 +219,36 @@ async fn files_dedupe_per_user_and_are_cleaned_up() {
 #[tokio::test]
 async fn move_endpoint_checks_owner_and_groups() {
     let a = app("move");
-    let x = a.new_card("alice", "x", false).await.1["id"].as_i64().unwrap();
-    let y = a.new_card("alice", "y", false).await.1["id"].as_i64().unwrap();
-    let t = a.new_card("alice", "t\n- [ ] open", false).await.1["id"].as_i64().unwrap();
-    let mv = |id: i64, prev: Option<i64>, next: Option<i64>| (format!("/api/notes/{id}/move"), serde_json::json!({ "prev": prev, "next": next }).to_string().into_bytes());
-    let (u, b) = mv(x, None, Some(y));
+    let x = a.new_card("alice", "x", false).await.1["id"].as_str().unwrap().to_string();
+    let y = a.new_card("alice", "y", false).await.1["id"].as_str().unwrap().to_string();
+    let t = a.new_card("alice", "t\n- [ ] open", false).await.1["id"].as_str().unwrap().to_string();
+    let mv = |id: &str, prev: Option<&str>, next: Option<&str>| (format!("/api/notes/{id}/move"), serde_json::json!({ "prev": prev, "next": next }).to_string().into_bytes());
+    let (u, b) = mv(&x, None, Some(&y));
     assert_eq!(a.call("POST", &u, Some("alice"), b, true).await.0, StatusCode::OK);
     let (_, _, list) = a.call("GET", "/api/notes", Some("alice"), vec![], false).await;
-    let order: Vec<i64> = serde_json::from_slice::<serde_json::Value>(&list).unwrap()["notes"].as_array().unwrap().iter().map(|n| n["id"].as_i64().unwrap()).collect();
-    assert_eq!(order, vec![t, x, y]);
-    let (u, b) = mv(x, Some(t), None);
+    let order: Vec<String> = serde_json::from_slice::<serde_json::Value>(&list).unwrap()["notes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(order, vec![t.clone(), x.clone(), y.clone()]);
+    let (u, b) = mv(&x, Some(&t), None);
     assert_eq!(a.call("POST", &u, Some("alice"), b, true).await.0, StatusCode::BAD_REQUEST, "cannot cross the open-todo group");
-    let (u, b) = mv(x, None, None);
+    let (u, b) = mv(&x, None, None);
     assert_eq!(a.call("POST", &u, Some("alice"), b, true).await.0, StatusCode::BAD_REQUEST);
-    let (u, b) = mv(x, None, Some(y));
+    let (u, b) = mv(&x, None, Some(&y));
     assert_eq!(a.call("POST", &u, Some("bob"), b, true).await.0, StatusCode::NOT_FOUND, "bob cannot move alice's card");
-    let (u, b) = mv(x, None, Some(y));
+    let (u, b) = mv(&x, None, Some(&y));
     assert_eq!(a.call("POST", &u, None, b, true).await.0, StatusCode::UNAUTHORIZED);
     std::fs::remove_dir_all(&a.media).ok();
+}
+
+#[tokio::test]
+async fn old_numeric_urls_and_made_up_ids_are_simply_not_found() {
+    let a = app("old-ids");
+    for uri in ["/api/media/12", "/api/media/12/thumb", "/api/notes/7", "/api/notes/7/attachments", "/api/rules/3", "/api/media/not-an-id", "/api/notes/..%2F..%2Fx"] {
+        for method in ["GET", "PUT", "DELETE", "POST"] {
+            let (s, _, body) = a.call(method, uri, Some("alice"), br#"{"body":"x"}"#.to_vec(), true).await;
+            // a method the route does not have is 405; every route that has it answers 404 with the usual error body
+            if s != StatusCode::METHOD_NOT_ALLOWED {
+                assert_eq!(s, StatusCode::NOT_FOUND, "{method} {uri}: {}", String::from_utf8_lossy(&body));
+            }
+        }
+    }
 }

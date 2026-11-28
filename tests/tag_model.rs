@@ -33,13 +33,13 @@ fn story(store: &dyn NoteStore, source: &dyn TagSource, cache: &ModelCache) {
     assert_eq!(cache.trained(), 3, "bob's own model is rebuilt");
 
     // editing and deleting count as changes too, and only for the owner
-    let ann_card = store.list("ann", &Default::default()).unwrap()[0].id;
-    store.update("ann", ann_card, &note("now about gardening #garden")).unwrap();
+    let ann_card = store.list("ann", &Default::default()).unwrap()[0].id.clone();
+    store.update("ann", &ann_card, &note("now about gardening #garden")).unwrap();
     svc().suggest("bob", "milk").unwrap();
     assert_eq!(cache.trained(), 3);
     svc().suggest("ann", "lambda").unwrap();
     assert_eq!(cache.trained(), 4);
-    store.delete("ann", ann_card).unwrap();
+    store.delete("ann", &ann_card).unwrap();
     svc().suggest("ann", "lambda").unwrap();
     assert_eq!(cache.trained(), 5);
 

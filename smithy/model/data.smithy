@@ -31,11 +31,18 @@ service ChuckData {
     ]
 }
 
-long NoteId
+/// Identifies a card. 26 characters (Crockford base32), assigned by the server; treat it as opaque text. Ids made earlier
+/// sort earlier, but nothing else about them is promised.
+@pattern("^[0-9A-HJKMNP-TV-Z]{26}$")
+string NoteId
 
-long AttachmentId
+/// Identifies a file on a card. Same shape as a card id.
+@pattern("^[0-9A-HJKMNP-TV-Z]{26}$")
+string AttachmentId
 
-long RuleId
+/// Identifies an auto-tag rule. Same shape as a card id.
+@pattern("^[0-9A-HJKMNP-TV-Z]{26}$")
+string RuleId
 
 enum CardKind {
     NOTE = "note"

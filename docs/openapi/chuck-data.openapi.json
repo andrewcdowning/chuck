@@ -99,8 +99,11 @@
                     {
                         "name": "id",
                         "in": "path",
+                        "description": "Identifies a file on a card. Same shape as a card id.",
                         "schema": {
-                            "type": "number"
+                            "type": "string",
+                            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                            "description": "Identifies a file on a card. Same shape as a card id."
                         },
                         "required": true
                     }
@@ -158,8 +161,11 @@
                     {
                         "name": "id",
                         "in": "path",
+                        "description": "Identifies a file on a card. Same shape as a card id.",
                         "schema": {
-                            "type": "number"
+                            "type": "string",
+                            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                            "description": "Identifies a file on a card. Same shape as a card id."
                         },
                         "required": true
                     },
@@ -278,8 +284,11 @@
                     {
                         "name": "id",
                         "in": "path",
+                        "description": "Identifies a file on a card. Same shape as a card id.",
                         "schema": {
-                            "type": "number"
+                            "type": "string",
+                            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                            "description": "Identifies a file on a card. Same shape as a card id."
                         },
                         "required": true
                     }
@@ -531,8 +540,11 @@
                     {
                         "name": "id",
                         "in": "path",
+                        "description": "Identifies a card. 26 characters (Crockford base32), assigned by the server; treat it as opaque text. Ids made earlier\nsort earlier, but nothing else about them is promised.",
                         "schema": {
-                            "type": "number"
+                            "type": "string",
+                            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                            "description": "Identifies a card. 26 characters (Crockford base32), assigned by the server; treat it as opaque text. Ids made earlier\nsort earlier, but nothing else about them is promised."
                         },
                         "required": true
                     }
@@ -599,8 +611,11 @@
                     {
                         "name": "id",
                         "in": "path",
+                        "description": "Identifies a card. 26 characters (Crockford base32), assigned by the server; treat it as opaque text. Ids made earlier\nsort earlier, but nothing else about them is promised.",
                         "schema": {
-                            "type": "number"
+                            "type": "string",
+                            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                            "description": "Identifies a card. 26 characters (Crockford base32), assigned by the server; treat it as opaque text. Ids made earlier\nsort earlier, but nothing else about them is promised."
                         },
                         "required": true
                     }
@@ -687,8 +702,11 @@
                     {
                         "name": "id",
                         "in": "path",
+                        "description": "Identifies a card. 26 characters (Crockford base32), assigned by the server; treat it as opaque text. Ids made earlier\nsort earlier, but nothing else about them is promised.",
                         "schema": {
-                            "type": "number"
+                            "type": "string",
+                            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                            "description": "Identifies a card. 26 characters (Crockford base32), assigned by the server; treat it as opaque text. Ids made earlier\nsort earlier, but nothing else about them is promised."
                         },
                         "required": true
                     },
@@ -802,8 +820,11 @@
                     {
                         "name": "id",
                         "in": "path",
+                        "description": "Identifies a card. 26 characters (Crockford base32), assigned by the server; treat it as opaque text. Ids made earlier\nsort earlier, but nothing else about them is promised.",
                         "schema": {
-                            "type": "number"
+                            "type": "string",
+                            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                            "description": "Identifies a card. 26 characters (Crockford base32), assigned by the server; treat it as opaque text. Ids made earlier\nsort earlier, but nothing else about them is promised."
                         },
                         "required": true
                     }
@@ -1029,8 +1050,11 @@
                     {
                         "name": "id",
                         "in": "path",
+                        "description": "Identifies an auto-tag rule. Same shape as a card id.",
                         "schema": {
-                            "type": "number"
+                            "type": "string",
+                            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                            "description": "Identifies an auto-tag rule. Same shape as a card id."
                         },
                         "required": true
                     }
@@ -1265,10 +1289,14 @@
                 "type": "object",
                 "properties": {
                     "id": {
-                        "type": "number"
+                        "type": "string",
+                        "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "Identifies a file on a card. Same shape as a card id."
                     },
                     "note_id": {
-                        "type": "number"
+                        "type": "string",
+                        "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "Identifies a card. 26 characters (Crockford base32), assigned by the server; treat it as opaque text. Ids made earlier\nsort earlier, but nothing else about them is promised."
                     },
                     "mime": {
                         "type": "string",
@@ -1412,11 +1440,13 @@
                 "type": "object",
                 "properties": {
                     "prev": {
-                        "type": "number",
+                        "type": "string",
+                        "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
                         "description": "The card that will be directly above this one, or absent for the top of its group."
                     },
                     "next": {
-                        "type": "number",
+                        "type": "string",
+                        "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
                         "description": "The card that will be directly below this one, or absent for the bottom."
                     }
                 }
@@ -1436,7 +1466,9 @@
                 "type": "object",
                 "properties": {
                     "id": {
-                        "type": "number"
+                        "type": "string",
+                        "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "Identifies a card. 26 characters (Crockford base32), assigned by the server; treat it as opaque text. Ids made earlier\nsort earlier, but nothing else about them is promised."
                     },
                     "kind": {
                         "$ref": "#/components/schemas/CardKind"
@@ -1532,7 +1564,9 @@
                 "type": "object",
                 "properties": {
                     "id": {
-                        "type": "number"
+                        "type": "string",
+                        "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "Identifies an auto-tag rule. Same shape as a card id."
                     },
                     "pattern": {
                         "type": "string",

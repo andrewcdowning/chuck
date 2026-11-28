@@ -16,6 +16,11 @@ use chuck_data::store::*;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// A list of ids to compare with a listing: `idv![a, b]` is `vec![a.clone(), b.clone()]`.
+macro_rules! idv {
+    ($($i:expr),* $(,)?) => { vec![$($i.clone()),*] };
+}
+
 /// Makes a new, empty store for one case.
 pub type Make = dyn Fn() -> Arc<dyn Store>;
 
@@ -35,6 +40,7 @@ pub fn run_notes(make: &Make) {
     attachment_cap(make);
     ownership_is_checked_first(make);
     rule_cap(make);
+    ids_are_opaque_and_never_reused(make);
     tag_suggestions_confidence_and_feedback(make);
     account_lifecycle(make);
 }
@@ -58,11 +64,11 @@ pub fn crud_tags_and_isolation(make: &Make) {
     assert_eq!(r.len(), 1);
     assert_eq!(s.tags("me").unwrap().len(), 2);
 
-    let u = s.update("me", a.id, &inp("Now about #other")).unwrap();
+    let u = s.update("me", &a.id, &inp("Now about #other")).unwrap();
     assert_eq!(u.tags, vec!["other"]);
     assert!(s.list("me", &NoteQuery { q: Some("deadline".into()), ..Default::default() }).unwrap().is_empty());
-    assert!(matches!(s.delete("other", a.id), Err(StoreError::NotFound)));
-    s.delete("me", a.id).unwrap();
+    assert!(matches!(s.delete("other", &a.id), Err(StoreError::NotFound)));
+    s.delete("me", &a.id).unwrap();
     // injection-ish input must not error
     s.list("me", &NoteQuery { q: Some("\" OR * ( NEAR".into()), ..Default::default() }).unwrap();
 }
@@ -77,15 +83,15 @@ pub fn reminders(make: &Make) {
     assert_eq!(r.iter().map(|n| n.remind_at.unwrap()).collect::<Vec<_>>(), vec![1000, 2000]);
 
     // body-only edit leaves the reminder alone
-    let u = s.update("me", n.id, &NoteInput { body: "Stand up!".into(), ..Default::default() }).unwrap();
+    let u = s.update("me", &n.id, &NoteInput { body: "Stand up!".into(), ..Default::default() }).unwrap();
     assert_eq!((u.remind_at, u.repeat.as_deref()), (Some(2000), Some("daily")));
     // marking done removes it from pending; re-arming with a new time brings it back
-    s.update("me", n.id, &NoteInput { body: "Stand up!".into(), reminder_done: Some(true), ..Default::default() }).unwrap();
+    s.update("me", &n.id, &NoteInput { body: "Stand up!".into(), reminder_done: Some(true), ..Default::default() }).unwrap();
     assert_eq!(s.list("me", &q).unwrap().len(), 1);
-    s.update("me", n.id, &NoteInput { body: "Stand up!".into(), remind_at: Some(3000), ..Default::default() }).unwrap();
+    s.update("me", &n.id, &NoteInput { body: "Stand up!".into(), remind_at: Some(3000), ..Default::default() }).unwrap();
     assert_eq!(s.list("me", &q).unwrap().len(), 2);
     // clearing
-    let c = s.update("me", n.id, &NoteInput { body: "x".into(), remind_at: Some(0), repeat: Some("".into()), ..Default::default() }).unwrap();
+    let c = s.update("me", &n.id, &NoteInput { body: "x".into(), remind_at: Some(0), repeat: Some("".into()), ..Default::default() }).unwrap();
     assert!(c.remind_at.is_none() && c.repeat.is_none());
 }
 
@@ -102,18 +108,18 @@ pub fn todo_cards_pin_and_due(make: &Make) {
 
     let ids = |s: &dyn NoteStore| s.list("me", &NoteQuery::default()).unwrap().into_iter().map(|n| n.id).collect::<Vec<_>>();
     // open todos first, soonest due first, undated after dated; then the rest newest first
-    assert_eq!(ids(&*s), vec![todo_soon.id, todo_late.id, todo_nodue.id, plain_new.id, plain_old.id]);
+    assert_eq!(ids(&*s), idv![todo_soon.id, todo_late.id, todo_nodue.id, plain_new.id, plain_old.id]);
 
     // completing every item drops the card out of the pinned group
-    s.update("me", todo_soon.id, &mk("Soon\n- [x] y", None)).unwrap();
-    assert_eq!(ids(&*s), vec![todo_late.id, todo_nodue.id, plain_new.id, todo_soon.id, plain_old.id]);
+    s.update("me", &todo_soon.id, &mk("Soon\n- [x] y", None)).unwrap();
+    assert_eq!(ids(&*s), idv![todo_late.id, todo_nodue.id, plain_new.id, todo_soon.id, plain_old.id]);
     // due date is kept when absent from an update, and cleared with 0
-    assert_eq!(s.get("me", todo_soon.id).unwrap().due_at, Some(1_000));
-    let cleared = s.update("me", todo_soon.id, &mk("Soon\n- [x] y", Some(0))).unwrap();
+    assert_eq!(s.get("me", &todo_soon.id).unwrap().due_at, Some(1_000));
+    let cleared = s.update("me", &todo_soon.id, &mk("Soon\n- [x] y", Some(0))).unwrap();
     assert!(cleared.due_at.is_none());
     // reopening an item pins it again, back at its own place in the group
-    s.update("me", todo_soon.id, &mk("Soon\n- [ ] y", None)).unwrap();
-    assert_eq!(ids(&*s), vec![todo_soon.id, todo_late.id, todo_nodue.id, plain_new.id, plain_old.id]);
+    s.update("me", &todo_soon.id, &mk("Soon\n- [ ] y", None)).unwrap();
+    assert_eq!(ids(&*s), idv![todo_soon.id, todo_late.id, todo_nodue.id, plain_new.id, plain_old.id]);
 }
 
 pub fn auto_tag_rules(make: &Make) {
@@ -129,14 +135,14 @@ pub fn auto_tag_rules(make: &Make) {
     assert_eq!(n.tags, vec!["urgent", "work"]);
     // existing notes are tagged on demand
     assert_eq!(s.apply_rules("me").unwrap(), 1);
-    assert_eq!(s.get("me", old.id).unwrap().tags, vec!["work"]);
+    assert_eq!(s.get("me", &old.id).unwrap().tags, vec!["work"]);
     assert_eq!(s.apply_rules("me").unwrap(), 0);
     // owner isolation
     assert_eq!(s.rules("me").unwrap().len(), 1);
     assert!(s.create("me", &inp("milk")).unwrap().tags.is_empty());
     let r = s.rules("me").unwrap();
-    assert!(matches!(s.delete_rule("other", r[0].id), Err(StoreError::NotFound)));
-    s.delete_rule("me", r[0].id).unwrap();
+    assert!(matches!(s.delete_rule("other", &r[0].id), Err(StoreError::NotFound)));
+    s.delete_rule("me", &r[0].id).unwrap();
     assert!(s.rules("me").unwrap().is_empty());
 }
 
@@ -201,35 +207,35 @@ pub fn attachments_are_owned_ordered_and_cascade(make: &Make) {
         blob_key: key.into(),
         sha256: "x".into(),
     };
-    let a1 = s.add_attachment("alice", n.id, &new("k1")).unwrap();
-    let a2 = s.add_attachment("alice", n.id, &new("k2")).unwrap();
-    let note = s.get("alice", n.id).unwrap();
+    let a1 = s.add_attachment("alice", &n.id, &new("k1")).unwrap();
+    let a2 = s.add_attachment("alice", &n.id, &new("k2")).unwrap();
+    let note = s.get("alice", &n.id).unwrap();
     assert_eq!(note.kind, "media");
-    assert_eq!(note.attachments.iter().map(|a| a.id).collect::<Vec<_>>(), vec![a1.id, a2.id]);
+    assert_eq!(note.attachments.iter().map(|a| a.id.clone()).collect::<Vec<_>>(), idv![a1.id, a2.id]);
     // keys never serialize
     let json = serde_json::to_string(&note).unwrap();
     assert!(!json.contains("k1") && json.contains("\"has_thumb\":false"));
 
     // another user can neither attach to, read, change nor delete alice's attachments
-    assert!(matches!(s.add_attachment("bob", n.id, &new("kb")), Err(StoreError::NotFound)));
-    assert!(matches!(s.attachment("bob", a1.id), Err(StoreError::NotFound)));
-    assert!(matches!(s.set_attachment_thumb("bob", a1.id, "t"), Err(StoreError::NotFound)));
-    assert!(matches!(s.delete_attachment("bob", a1.id), Err(StoreError::NotFound)));
+    assert!(matches!(s.add_attachment("bob", &n.id, &new("kb")), Err(StoreError::NotFound)));
+    assert!(matches!(s.attachment("bob", &a1.id), Err(StoreError::NotFound)));
+    assert!(matches!(s.set_attachment_thumb("bob", &a1.id, "t"), Err(StoreError::NotFound)));
+    assert!(matches!(s.delete_attachment("bob", &a1.id), Err(StoreError::NotFound)));
     assert!(!s.blob_referenced("bob", "k1").unwrap());
-    assert!(s.get("bob", other.id).unwrap().attachments.is_empty());
+    assert!(s.get("bob", &other.id).unwrap().attachments.is_empty());
 
     // previews
-    assert_eq!(s.set_attachment_thumb("alice", a1.id, "t1").unwrap(), None);
-    assert_eq!(s.set_attachment_thumb("alice", a1.id, "t2").unwrap(), Some("t1".to_string()));
-    assert!(s.attachment("alice", a1.id).unwrap().has_thumb);
+    assert_eq!(s.set_attachment_thumb("alice", &a1.id, "t1").unwrap(), None);
+    assert_eq!(s.set_attachment_thumb("alice", &a1.id, "t2").unwrap(), Some("t1".to_string()));
+    assert!(s.attachment("alice", &a1.id).unwrap().has_thumb);
     assert!(s.blob_referenced("alice", "t2").unwrap() && !s.blob_referenced("alice", "t1").unwrap());
 
     // delete one, then the note: the rest cascade
-    let gone = s.delete_attachment("alice", a2.id).unwrap();
+    let gone = s.delete_attachment("alice", &a2.id).unwrap();
     assert_eq!(gone.blob_key, "k2");
     assert!(!s.blob_referenced("alice", "k2").unwrap());
-    s.delete("alice", n.id).unwrap();
-    assert!(matches!(s.attachment("alice", a1.id), Err(StoreError::NotFound)));
+    s.delete("alice", &n.id).unwrap();
+    assert!(matches!(s.attachment("alice", &a1.id), Err(StoreError::NotFound)));
     assert!(!s.blob_referenced("alice", "k1").unwrap());
 }
 
@@ -243,39 +249,39 @@ pub fn manual_order_within_groups(make: &Make) {
     let t2 = s.create("me", &mk("t2\n- [ ] x", Some(200))).unwrap().id;
     let other = s.create("you", &mk("theirs", None)).unwrap().id;
     let ids = |s: &dyn NoteStore| s.list("me", &NoteQuery::default()).unwrap().into_iter().map(|n| n.id).collect::<Vec<_>>();
-    assert_eq!(ids(&*s), vec![t1, t2, c, b, a], "new cards on top, todos slotted by due date");
+    assert_eq!(ids(&*s), idv![t1, t2, c, b, a], "new cards on top, todos slotted by due date");
 
     // move within the rest: a between c and b; then to the top; then to the bottom
-    s.move_note("me", a, Some(c), Some(b)).unwrap();
-    assert_eq!(ids(&*s), vec![t1, t2, c, a, b]);
-    s.move_note("me", b, None, Some(c)).unwrap();
-    assert_eq!(ids(&*s), vec![t1, t2, b, c, a]);
-    s.move_note("me", b, Some(a), None).unwrap();
-    assert_eq!(ids(&*s), vec![t1, t2, c, a, b]);
+    s.move_note("me", &a, Some(&c), Some(&b)).unwrap();
+    assert_eq!(ids(&*s), idv![t1, t2, c, a, b]);
+    s.move_note("me", &b, None, Some(&c)).unwrap();
+    assert_eq!(ids(&*s), idv![t1, t2, b, c, a]);
+    s.move_note("me", &b, Some(&a), None).unwrap();
+    assert_eq!(ids(&*s), idv![t1, t2, c, a, b]);
     // within the todo group, manual order replaces due-date order...
-    s.move_note("me", t1, Some(t2), None).unwrap();
-    assert_eq!(ids(&*s), vec![t2, t1, c, a, b]);
+    s.move_note("me", &t1, Some(&t2), None).unwrap();
+    assert_eq!(ids(&*s), idv![t2, t1, c, a, b]);
     // ...and a new todo is still slotted by due date among them: before the first one due later
     let t3 = s.create("me", &mk("t3\n- [ ] x", Some(150))).unwrap().id;
-    assert_eq!(ids(&*s), vec![t3, t2, t1, c, a, b], "t2 (due 200) is the first due after 150");
+    assert_eq!(ids(&*s), idv![t3, t2, t1, c, a, b], "t2 (due 200) is the first due after 150");
     let t4 = s.create("me", &mk("t4\n- [ ] x", None)).unwrap().id;
-    assert_eq!(ids(&*s)[..4], [t3, t2, t1, t4], "undated todos go last in the group");
+    assert_eq!(ids(&*s)[..4], idv![t3, t2, t1, t4][..], "undated todos go last in the group");
 
     // across the group boundary, someone else's card, bad neighbours
-    assert!(matches!(s.move_note("me", a, Some(t1), None), Err(StoreError::Invalid(_))));
-    assert!(matches!(s.move_note("me", t1, Some(c), None), Err(StoreError::Invalid(_))));
-    assert!(matches!(s.move_note("me", a, Some(other), None), Err(StoreError::NotFound)));
-    assert!(matches!(s.move_note("you", a, Some(b), None), Err(StoreError::NotFound)));
-    assert!(matches!(s.move_note("me", a, None, None), Err(StoreError::Invalid(_))));
-    assert!(matches!(s.move_note("me", a, Some(a), None), Err(StoreError::Invalid(_))));
-    assert!(matches!(s.move_note("me", a, Some(b), Some(c)), Err(StoreError::Invalid(_))), "above must come before below");
+    assert!(matches!(s.move_note("me", &a, Some(&t1), None), Err(StoreError::Invalid(_))));
+    assert!(matches!(s.move_note("me", &t1, Some(&c), None), Err(StoreError::Invalid(_))));
+    assert!(matches!(s.move_note("me", &a, Some(&other), None), Err(StoreError::NotFound)));
+    assert!(matches!(s.move_note("you", &a, Some(&b), None), Err(StoreError::NotFound)));
+    assert!(matches!(s.move_note("me", &a, None, None), Err(StoreError::Invalid(_))));
+    assert!(matches!(s.move_note("me", &a, Some(&a), None), Err(StoreError::Invalid(_))));
+    assert!(matches!(s.move_note("me", &a, Some(&b), Some(&c)), Err(StoreError::Invalid(_))), "above must come before below");
     assert_eq!(s.list("you", &NoteQuery::default()).unwrap().len(), 1);
 
     // completing a todo drops it into the rest at its own position; reopening brings it back to its place
-    s.update("me", t1, &mk("t1\n- [x] x", None)).unwrap();
+    s.update("me", &t1, &mk("t1\n- [x] x", None)).unwrap();
     assert!(!ids(&*s)[..3].contains(&t1));
-    s.update("me", t1, &mk("t1\n- [ ] x", None)).unwrap();
-    assert_eq!(ids(&*s)[..4], [t3, t2, t1, t4]);
+    s.update("me", &t1, &mk("t1\n- [ ] x", None)).unwrap();
+    assert_eq!(ids(&*s)[..4], idv![t3, t2, t1, t4][..]);
 }
 
 pub fn many_moves_into_one_gap(make: &Make) {
@@ -283,17 +289,17 @@ pub fn many_moves_into_one_gap(make: &Make) {
     let mk = |b: &str| NoteInput { body: b.into(), ..Default::default() };
     let x = s.create("me", &mk("x")).unwrap().id;
     let y = s.create("me", &mk("y")).unwrap().id;
-    let movers: Vec<i64> = (0..80).map(|i| s.create("me", &mk(&format!("m{i}"))).unwrap().id).collect();
+    let movers: Vec<String> = (0..80).map(|i| s.create("me", &mk(&format!("m{i}"))).unwrap().id).collect();
     // keep pushing cards between y and the previous mover: halves the gap every time, more often than any fixed-size
     // number could stand
-    let mut below = x;
+    let mut below = x.clone();
     for m in &movers {
-        s.move_note("me", *m, Some(y), Some(below)).unwrap();
-        below = *m;
+        s.move_note("me", m, Some(&y), Some(&below)).unwrap();
+        below = m.clone();
     }
-    let ids: Vec<i64> = s.list("me", &NoteQuery { limit: Some(200), ..Default::default() }).unwrap().into_iter().map(|n| n.id).collect();
+    let ids: Vec<String> = s.list("me", &NoteQuery { limit: Some(200), ..Default::default() }).unwrap().into_iter().map(|n| n.id).collect();
     let mut expect = vec![y];
-    expect.extend(movers.iter().rev());
+    expect.extend(movers.iter().rev().cloned());
     expect.push(x);
     assert_eq!(ids, expect);
 }
@@ -336,9 +342,9 @@ pub fn account_lifecycle(make: &Make) {
         blobs.put(k, b"x").unwrap();
     }
     let new = |k: &str| NewAttachment { mime: "image/jpeg".into(), bytes: 100, width: Some(1), height: Some(1), duration_ms: None, name: None, blob_key: k.into(), sha256: "x".into() };
-    let a = s.add_attachment("alice", mine.id, &new("alice/f1")).unwrap();
-    s.set_attachment_thumb("alice", a.id, "alice/t1").unwrap();
-    s.add_attachment("bob", bobs.id, &new("bob/f1")).unwrap();
+    let a = s.add_attachment("alice", &mine.id, &new("alice/f1")).unwrap();
+    s.set_attachment_thumb("alice", &a.id, "alice/t1").unwrap();
+    s.add_attachment("bob", &bobs.id, &new("bob/f1")).unwrap();
     let summary = accounts.summaries().unwrap();
     let alice = summary.iter().find(|u| u.user.id == "alice").unwrap();
     assert_eq!((alice.notes, alice.attachments, alice.storage_bytes), (1, 1, 100));
@@ -348,7 +354,7 @@ pub fn account_lifecycle(make: &Make) {
     assert!(blobs.get("bob/f1").is_ok(), "his are not");
     assert!(s.list("alice", &NoteQuery { q: Some("ALICEWORD".into()), ..Default::default() }).unwrap().is_empty(), "search index cleaned");
     assert!(s.tags("alice").unwrap().is_empty() && s.rules("alice").unwrap().is_empty() && s.feedback_events("alice").unwrap().is_empty());
-    assert!(matches!(s.attachment("alice", a.id), Err(StoreError::NotFound)));
+    assert!(matches!(s.attachment("alice", &a.id), Err(StoreError::NotFound)));
     assert_eq!(accounts.summaries().unwrap().len(), 1);
     assert_eq!(s.list("bob", &NoteQuery::default()).unwrap().len(), 1, "bob untouched");
     assert!(s.blob_referenced("bob", "bob/f1").unwrap());
@@ -377,26 +383,26 @@ pub fn search_contract(make: &Make) {
     let school = mk("me", "École élémentaire en été");
     let theirs = mk("you", "Deadline secret");
     let find = |o: &str, q: &str| {
-        let mut v: Vec<i64> = s.list(o, &NoteQuery { q: Some(q.into()), ..Default::default() }).unwrap().into_iter().map(|n| n.id).collect();
+        let mut v: Vec<String> = s.list(o, &NoteQuery { q: Some(q.into()), ..Default::default() }).unwrap().into_iter().map(|n| n.id).collect();
         v.sort();
         v
     };
-    let mut both = vec![report, street];
+    let mut both = idv![report, street];
     both.sort();
-    assert_eq!(find("me", "DEADLINE"), vec![report], "case-insensitive");
+    assert_eq!(find("me", "DEADLINE"), idv![report], "case-insensitive");
     assert_eq!(find("me", "dead"), both, "prefix of a word");
     assert!(find("me", "line").is_empty(), "never from the middle of a word");
-    assert_eq!(find("me", "report dead"), vec![report], "all words, any order");
+    assert_eq!(find("me", "report dead"), idv![report], "all words, any order");
     assert!(find("me", "dead zebra").is_empty(), "every word must match");
-    assert_eq!(find("me", "ÉCOLE"), vec![school], "case-insensitive beyond ASCII");
+    assert_eq!(find("me", "ÉCOLE"), idv![school], "case-insensitive beyond ASCII");
     assert_eq!(find("me", "   ").len(), 3, "a blank query filters nothing");
     for q in ["\"", "\"\"", "* OR (", "a\"b", "NEAR(", "-", "^x", "dead:", "AND", "'; DROP TABLE notes; --"] {
         s.list("me", &NoteQuery { q: Some(q.into()), ..Default::default() }).unwrap();
     }
     assert!(find("you", "street").is_empty(), "other owners' cards are never searched");
-    assert_eq!(find("you", "dead"), vec![theirs]);
+    assert_eq!(find("you", "dead"), idv![theirs]);
     let tagged = s.list("me", &NoteQuery { q: Some("dead".into()), tag: Some("#Work".into()), ..Default::default() }).unwrap();
-    assert_eq!(tagged.iter().map(|n| n.id).collect::<Vec<_>>(), vec![report], "search and tag filters combine");
+    assert_eq!(tagged.iter().map(|n| n.id.clone()).collect::<Vec<_>>(), idv![report], "search and tag filters combine");
 }
 
 /// Update semantics, as documented on `NoteInput`: an absent field is unchanged, a value of 0 or less (or an empty
@@ -405,29 +411,29 @@ pub fn update_semantics(make: &Make) {
     let s = make();
     let inp = |b: &str| NoteInput { body: b.into(), ..Default::default() };
     let n = s.create("me", &NoteInput { body: "a".into(), remind_at: Some(100), repeat: Some("weekly".into()), due_at: Some(50), ..Default::default() }).unwrap();
-    let u = s.update("me", n.id, &inp("b")).unwrap();
+    let u = s.update("me", &n.id, &inp("b")).unwrap();
     assert_eq!((u.body.as_str(), u.remind_at, u.repeat.as_deref(), u.due_at, u.reminder_done), ("b", Some(100), Some("weekly"), Some(50), false));
     assert!(u.updated_at >= u.created_at);
 
-    s.update("me", n.id, &NoteInput { body: "b".into(), reminder_done: Some(true), ..Default::default() }).unwrap();
-    let same = s.update("me", n.id, &NoteInput { body: "b".into(), remind_at: Some(100), ..Default::default() }).unwrap();
+    s.update("me", &n.id, &NoteInput { body: "b".into(), reminder_done: Some(true), ..Default::default() }).unwrap();
+    let same = s.update("me", &n.id, &NoteInput { body: "b".into(), remind_at: Some(100), ..Default::default() }).unwrap();
     assert!(same.reminder_done, "the same time does not re-arm");
-    let moved = s.update("me", n.id, &NoteInput { body: "b".into(), remind_at: Some(200), ..Default::default() }).unwrap();
+    let moved = s.update("me", &n.id, &NoteInput { body: "b".into(), remind_at: Some(200), ..Default::default() }).unwrap();
     assert!(!moved.reminder_done && moved.remind_at == Some(200), "a new time re-arms");
 
-    let cleared = s.update("me", n.id, &NoteInput { body: "c".into(), remind_at: Some(-5), due_at: Some(-1), repeat: Some(String::new()), ..Default::default() }).unwrap();
+    let cleared = s.update("me", &n.id, &NoteInput { body: "c".into(), remind_at: Some(-5), due_at: Some(-1), repeat: Some(String::new()), ..Default::default() }).unwrap();
     assert_eq!((cleared.remind_at, cleared.due_at, cleared.repeat), (None, None, None));
 
-    assert!(matches!(s.update("me", 9_999_999, &inp("x")), Err(StoreError::NotFound)));
-    assert!(matches!(s.update("you", n.id, &inp("x")), Err(StoreError::NotFound)));
-    assert_eq!(s.get("me", n.id).unwrap().body, "c", "a refused update changes nothing");
+    assert!(matches!(s.update("me", "7ZZZZZZZZZZZZZZZZZZZZZZZZZ", &inp("x")), Err(StoreError::NotFound)));
+    assert!(matches!(s.update("you", &n.id, &inp("x")), Err(StoreError::NotFound)));
+    assert_eq!(s.get("me", &n.id).unwrap().body, "c", "a refused update changes nothing");
 }
 
 /// Paging: the default page is 50, a page never exceeds 200, and pages follow one another without gaps or repeats,
 /// newest card first.
 pub fn paging(make: &Make) {
     let s = make();
-    let ids: Vec<i64> = (0..210).map(|i| s.create("me", &NoteInput { body: format!("n{i}"), ..Default::default() }).unwrap().id).collect();
+    let ids: Vec<String> = (0..210).map(|i| s.create("me", &NoteInput { body: format!("n{i}"), ..Default::default() }).unwrap().id).collect();
     let page = |limit: Option<u32>, offset: Option<u32>| s.list("me", &NoteQuery { limit, offset, ..Default::default() }).unwrap();
     assert_eq!(page(None, None).len(), 50);
     assert_eq!(page(Some(1000), None).len(), 200);
@@ -435,7 +441,7 @@ pub fn paging(make: &Make) {
     for offset in [0, 70, 140, 210] {
         seen.extend(page(Some(70), Some(offset)).into_iter().map(|n| n.id));
     }
-    let newest_first: Vec<i64> = ids.iter().rev().copied().collect();
+    let newest_first: Vec<String> = ids.iter().rev().cloned().collect();
     assert_eq!(seen, newest_first);
     assert!(page(Some(10), Some(500)).is_empty());
 }
@@ -455,8 +461,8 @@ pub fn card_kinds(make: &Make) {
     assert_eq!(mk("- [ ] a", Some(100)).kind, "reminder");
     let with_file = |b: &str, remind: Option<i64>, key: &str| {
         let n = mk(b, remind);
-        s.add_attachment("me", n.id, &new_attachment(key)).unwrap();
-        s.get("me", n.id).unwrap().kind
+        s.add_attachment("me", &n.id, &new_attachment(key)).unwrap();
+        s.get("me", &n.id).unwrap().kind
     };
     assert_eq!(with_file("pic", None, "k1"), "media");
     assert_eq!(with_file("- [ ] a", None, "k2"), "todo");
@@ -468,16 +474,16 @@ pub fn card_kinds(make: &Make) {
 pub fn attachment_cap(make: &Make) {
     let s = make();
     let n = s.create("me", &NoteInput { body: "many".into(), ..Default::default() }).unwrap();
-    let first = s.add_attachment("me", n.id, &new_attachment("k0")).unwrap();
+    let first = s.add_attachment("me", &n.id, &new_attachment("k0")).unwrap();
     for i in 1..MAX_ATTACHMENTS_PER_NOTE {
-        s.add_attachment("me", n.id, &new_attachment(&format!("k{i}"))).unwrap();
+        s.add_attachment("me", &n.id, &new_attachment(&format!("k{i}"))).unwrap();
     }
-    assert!(matches!(s.add_attachment("me", n.id, &new_attachment("over")), Err(StoreError::Invalid(_))));
+    assert!(matches!(s.add_attachment("me", &n.id, &new_attachment("over")), Err(StoreError::Invalid(_))));
     assert!(!s.blob_referenced("me", "over").unwrap());
-    s.delete_attachment("me", first.id).unwrap();
-    s.add_attachment("me", n.id, &new_attachment("again")).unwrap();
+    s.delete_attachment("me", &first.id).unwrap();
+    s.add_attachment("me", &n.id, &new_attachment("again")).unwrap();
     let other = s.create("me", &NoteInput { body: "other card".into(), ..Default::default() }).unwrap();
-    s.add_attachment("me", other.id, &new_attachment("k-other")).unwrap();
+    s.add_attachment("me", &other.id, &new_attachment("k-other")).unwrap();
 }
 
 /// Someone else's card is `NotFound` for every operation, whatever else is wrong with the request. Ownership is checked
@@ -488,14 +494,14 @@ pub fn ownership_is_checked_first(make: &Make) {
     let a = s.create("me", &inp("a")).unwrap().id;
     let b = s.create("me", &inp("b")).unwrap().id;
     let nf = |r: Result<()>, what: &str| assert!(matches!(r, Err(StoreError::NotFound)), "{what}");
-    nf(s.move_note("you", a, None, None).map(|_| ()), "move without neighbours");
-    nf(s.move_note("you", a, Some(a), None).map(|_| ()), "move next to itself");
-    nf(s.move_note("you", a, Some(b), Some(b)).map(|_| ()), "move between swapped neighbours");
-    nf(s.get("you", a).map(|_| ()), "get");
-    nf(s.update("you", a, &inp("")).map(|_| ()), "update with an empty body");
-    nf(s.delete("you", a), "delete");
-    nf(s.add_attachment("you", a, &new_attachment("k")).map(|_| ()), "attach");
-    nf(s.get("me", 9_999_999).map(|_| ()), "a card that does not exist");
+    nf(s.move_note("you", &a, None, None).map(|_| ()), "move without neighbours");
+    nf(s.move_note("you", &a, Some(&a), None).map(|_| ()), "move next to itself");
+    nf(s.move_note("you", &a, Some(&b), Some(&b)).map(|_| ()), "move between swapped neighbours");
+    nf(s.get("you", &a).map(|_| ()), "get");
+    nf(s.update("you", &a, &inp("")).map(|_| ()), "update with an empty body");
+    nf(s.delete("you", &a), "delete");
+    nf(s.add_attachment("you", &a, &new_attachment("k")).map(|_| ()), "attach");
+    nf(s.get("me", "7ZZZZZZZZZZZZZZZZZZZZZZZZZ").map(|_| ()), "a card that does not exist");
     assert_eq!(s.list("me", &NoteQuery::default()).unwrap().len(), 2);
 }
 
@@ -510,6 +516,41 @@ pub fn rule_cap(make: &Make) {
     assert!(matches!(s.add_rule("me", "over", "t"), Err(StoreError::Invalid(_))));
     assert_eq!(s.rules("me").unwrap().len(), chuck_data::service::MAX_RULES);
     s.add_rule("you", "mine", "t").unwrap();
-    s.delete_rule("me", first.id).unwrap();
+    s.delete_rule("me", &first.id).unwrap();
     s.add_rule("me", "again", "t").unwrap();
+}
+
+/// Ids are text of one fixed shape, made by the service, in creation order, and never reused, not even after deleting the
+/// newest card. An id of any other shape names nothing: every operation that takes one answers `NotFound`, never a different
+/// error that would tell a caller what the store looks like inside.
+pub fn ids_are_opaque_and_never_reused(make: &Make) {
+    let s = make();
+    let inp = |b: &str| NoteInput { body: b.into(), ..Default::default() };
+    let a = s.create("me", &inp("a")).unwrap();
+    let b = s.create("me", &inp("b")).unwrap();
+    let c = s.create("me", &inp("c")).unwrap();
+    assert!([&a.id, &b.id, &c.id].iter().all(|i| chuck_core::domain::id::is_valid(i)), "{}", a.id);
+    assert!(a.id < b.id && b.id < c.id, "ids made later sort later");
+    s.delete("me", &c.id).unwrap();
+    let d = s.create("me", &inp("d")).unwrap();
+    assert!(d.id != c.id && d.id > c.id, "the newest id is not handed out again");
+    let rule = s.add_rule("me", "x", "y").unwrap();
+    let att = s.add_attachment("me", &a.id, &new_attachment("k1")).unwrap();
+    assert!(chuck_core::domain::id::is_valid(&rule.id) && chuck_core::domain::id::is_valid(&att.id) && att.note_id == a.id);
+
+    let long = "A".repeat(500);
+    for bad in ["", "1", "42", "not-an-id", "../../etc/passwd", "01ARZ3NDEKTSV4RRFFQ69G5FA", "01arz3ndektsv4rrffq69g5fav", long.as_str()] {
+        let nf = |r: Result<()>, what: &str| assert!(matches!(r, Err(StoreError::NotFound)), "{what} with id {bad:?}");
+        nf(s.get("me", bad).map(|_| ()), "get");
+        nf(s.update("me", bad, &inp("x")).map(|_| ()), "update");
+        nf(s.delete("me", bad), "delete");
+        nf(s.move_note("me", bad, Some(&a.id), None).map(|_| ()), "move");
+        nf(s.move_note("me", &a.id, Some(bad), None).map(|_| ()), "move next to");
+        nf(s.add_attachment("me", bad, &new_attachment("kx")).map(|_| ()), "attach");
+        nf(s.attachment("me", bad).map(|_| ()), "attachment");
+        nf(s.set_attachment_thumb("me", bad, "t").map(|_| ()), "preview");
+        nf(s.delete_attachment("me", bad).map(|_| ()), "delete attachment");
+        nf(s.delete_rule("me", bad), "delete rule");
+    }
+    assert_eq!(s.list("me", &NoteQuery::default()).unwrap().len(), 3, "nothing was changed by any of them");
 }

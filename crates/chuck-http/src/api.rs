@@ -242,22 +242,22 @@ async fn create(State(s): State<AppState>, Authed(p): Authed, Query(q): Query<Cr
     Ok((StatusCode::CREATED, Json(n)))
 }
 
-async fn update(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
+async fn update(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<String>, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     let has_media = {
-        let (st, o) = (st.clone(), o.clone());
-        !blocking(move || st.get(&o, id)).await?.attachments.is_empty()
+        let (st, o, id) = (st.clone(), o.clone(), id.clone());
+        !blocking(move || st.get(&o, &id)).await?.attachments.is_empty()
     };
     let input = validate(b, has_media)?;
-    Ok(Json(blocking(move || st.update(&o, id, &input)).await?))
+    Ok(Json(blocking(move || st.update(&o, &id, &input)).await?))
 }
 
-async fn remove(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
+async fn remove(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<String>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     // The files go with the card's last use; the sweeper deletes them once nothing refers to them.
-    blocking(move || st.delete(&o, id)).await?;
+    blocking(move || st.delete(&o, &id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -325,10 +325,10 @@ async fn add_rule(State(s): State<AppState>, Authed(p): Authed, Json(b): Json<Ru
     Ok((StatusCode::CREATED, Json(r)))
 }
 
-async fn delete_rule(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
+async fn delete_rule(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<String>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
-    blocking(move || st.delete_rule(&o, id)).await?;
+    blocking(move || st.delete_rule(&o, &id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -396,13 +396,13 @@ struct AttachQuery {
 }
 
 /// Body: the raw file. The type is detected from the bytes; metadata is stripped before storing.
-async fn add_attachment(State(s): State<AppState>, Authed(p): Authed, Path(note_id): Path<i64>, Query(q): Query<AttachQuery>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
+async fn add_attachment(State(s): State<AppState>, Authed(p): Authed, Path(note_id): Path<String>, Query(q): Query<AttachQuery>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
     let name = clean_name(q.name);
     let res = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
         // Fail early, before any work, if the card is not this user's.
-        st.get(&o, note_id)?;
+        st.get(&o, &note_id)?;
         let c = media::check_upload(&body)?;
         let duration_ms = match q.duration_ms {
             Some(_) if !c.audio => None, // ignored for images
@@ -421,7 +421,7 @@ async fn add_attachment(State(s): State<AppState>, Authed(p): Authed, Path(note_
             sha256: blob::sha256_hex(&c.bytes),
             blob_key: key.clone(),
         };
-        match st.add_attachment(&o, note_id, &new) {
+        match st.add_attachment(&o, &note_id, &new) {
             Ok(a) => Ok(a),
             Err(e) => Err(e.into()), // the stored file is deleted by the sweeper if nothing else uses it
         }
@@ -432,18 +432,18 @@ async fn add_attachment(State(s): State<AppState>, Authed(p): Authed, Path(note_
 }
 
 /// Body: a small preview image for the attachment, made by the client.
-async fn put_thumb(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
+async fn put_thumb(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<String>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
     tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
-        st.attachment(&o, id)?;
+        st.attachment(&o, &id)?;
         let c = media::check_image(&body, media::MAX_THUMB_BYTES)?;
         if c.width > 1024 || c.height > 1024 {
             return Err(ApiError(StatusCode::BAD_REQUEST, "preview must be at most 1024 pixels on each side".into()));
         }
         let key = blob::key_for(&o, &c.bytes);
         blobs.put(&key, &c.bytes).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("storing file: {e}")))?;
-        st.set_attachment_thumb(&o, id, &key)?; // the replaced preview is deleted by the sweeper
+        st.set_attachment_thumb(&o, &id, &key)?; // the replaced preview is deleted by the sweeper
         Ok(())
     })
     .await
@@ -459,13 +459,13 @@ struct MediaQuery {
     v: Option<String>,
 }
 
-async fn get_media(State(s): State<AppState>, Authed(p): Authed, h: HeaderMap, Path(id): Path<i64>, Query(q): Query<MediaQuery>) -> Result<Response, ApiError> {
+async fn get_media(State(s): State<AppState>, Authed(p): Authed, h: HeaderMap, Path(id): Path<String>, Query(q): Query<MediaQuery>) -> Result<Response, ApiError> {
     let o = p.id.clone();
     let if_none_match = h.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_string);
     let wanted_v = q.v.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
     let (a, bytes, is_thumb) = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
-        let a = st.attachment(&o, id)?;
+        let a = st.attachment(&o, &id)?;
         let (key, is_thumb) = match (&a.thumb_key, q.thumb.unwrap_or(false)) {
             (Some(t), true) => (t.clone(), true),
             _ => (a.blob_key.clone(), false),
@@ -518,25 +518,25 @@ async fn get_media(State(s): State<AppState>, Authed(p): Authed, h: HeaderMap, P
     Ok(resp)
 }
 
-async fn delete_media(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
+async fn delete_media(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<String>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
-    blocking(move || st.delete_attachment(&o, id).map(|_| ())).await?;
+    blocking(move || st.delete_attachment(&o, &id).map(|_| ())).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
 struct MoveInput {
     /// The card that will be directly above (before) this one, or null for the top of its group.
-    prev: Option<i64>,
+    prev: Option<String>,
     /// The card that will be directly below (after) this one, or null for the bottom.
-    next: Option<i64>,
+    next: Option<String>,
 }
 
-async fn move_note(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>, Json(b): Json<MoveInput>) -> Result<impl IntoResponse, ApiError> {
+async fn move_note(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<String>, Json(b): Json<MoveInput>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
-    Ok(Json(blocking(move || st.move_note(&o, id, b.prev, b.next)).await?))
+    Ok(Json(blocking(move || st.move_note(&o, &id, b.prev.as_deref(), b.next.as_deref())).await?))
 }
 
 /// One byte range from a Range header: `bytes=a-b`, `bytes=a-` or `bytes=-n`. Several ranges are answered with the

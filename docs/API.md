@@ -25,6 +25,14 @@ between planes, so clients are unaffected by the split.
 - **Authentication** is not in the model. It is chosen per deployment (see [AUTH.md](AUTH.md)), so the documents have no
   security scheme; add one for your gateway when you publish them.
 
+## Ids
+
+Cards, files (attachments) and rules are identified by 26-character text ids such as `01M8FN3JY0P5P1FP9T6X9D59KC`. Treat
+them as opaque text: the server makes them, later ids sort after earlier ones, and nothing else is promised. A request for
+anything that is not an id of that shape (for example an old numeric id from a bookmark) is a 404, like a card that does not
+exist. Releases before this change used numbers; clients that stored those numbers must start again from a fresh listing.
+Account ids are unchanged: they are whatever the sign-in provides.
+
 ## Errors
 
 Error bodies are always `{"error": "<message>"}`. 400 means the request itself is wrong, 401 and 403 are about who you are,

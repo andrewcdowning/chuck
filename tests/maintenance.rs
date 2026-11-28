@@ -12,7 +12,7 @@ const NOW: i64 = 1_000_000;
 fn attach(store: &MemStore, owner: &str, key: &str) {
     let n = store.create(owner, &NoteInput { body: format!("card for {key}"), ..Default::default() }).unwrap();
     let a = NewAttachment { mime: "image/jpeg".into(), bytes: 1, width: None, height: None, duration_ms: None, name: None, blob_key: key.into(), sha256: "x".into() };
-    store.add_attachment(owner, n.id, &a).unwrap();
+    store.add_attachment(owner, &n.id, &a).unwrap();
 }
 
 #[test]

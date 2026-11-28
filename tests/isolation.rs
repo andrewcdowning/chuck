@@ -108,28 +108,28 @@ fn wav() -> Vec<u8> {
 }
 
 struct Fixture {
-    note: i64,
-    todo: i64,
-    reminder: i64,
-    image: i64,
-    audio: i64,
-    rule: i64,
+    note: String,
+    todo: String,
+    reminder: String,
+    image: String,
+    audio: String,
+    rule: String,
 }
 
 /// Alice's data: every kind of thing a user can own, each carrying the marker.
 async fn alice_data(a: &App) -> Fixture {
     let make = |body: Value| async move { body };
     let _ = make;
-    let note = a.json("POST", "/api/notes", "alice", Some(json!({ "body": format!("{MARK} plan #alicetag") }))).await.1["id"].as_i64().unwrap();
-    let todo = a.json("POST", "/api/notes", "alice", Some(json!({ "body": format!("{MARK} chores\n- [ ] sweep"), "due_at": 4_102_444_800i64 }))).await.1["id"].as_i64().unwrap();
-    let reminder = a.json("POST", "/api/notes", "alice", Some(json!({ "body": format!("{MARK} call"), "remind_at": 4_102_444_800i64 }))).await.1["id"].as_i64().unwrap();
+    let note = a.json("POST", "/api/notes", "alice", Some(json!({ "body": format!("{MARK} plan #alicetag") }))).await.1["id"].as_str().unwrap().to_string();
+    let todo = a.json("POST", "/api/notes", "alice", Some(json!({ "body": format!("{MARK} chores\n- [ ] sweep"), "due_at": 4_102_444_800i64 }))).await.1["id"].as_str().unwrap().to_string();
+    let reminder = a.json("POST", "/api/notes", "alice", Some(json!({ "body": format!("{MARK} call"), "remind_at": 4_102_444_800i64 }))).await.1["id"].as_str().unwrap().to_string();
     let image = a.raw("POST", &format!("/api/notes/{note}/attachments?name={MARK}.jpg"), Some("alice"), &[], jpeg(1)).await;
     assert_eq!(image.0, StatusCode::CREATED);
-    let image = serde_json::from_slice::<Value>(&image.2).unwrap()["id"].as_i64().unwrap();
+    let image = serde_json::from_slice::<Value>(&image.2).unwrap()["id"].as_str().unwrap().to_string();
     let audio = a.raw("POST", &format!("/api/notes/{note}/attachments?name={MARK}.wav&duration_ms=100"), Some("alice"), &[], wav()).await;
     assert_eq!(audio.0, StatusCode::CREATED);
-    let audio = serde_json::from_slice::<Value>(&audio.2).unwrap()["id"].as_i64().unwrap();
-    let rule = a.json("POST", "/api/rules", "alice", Some(json!({ "pattern": MARK, "tag": "alicetag" }))).await.1["id"].as_i64().unwrap();
+    let audio = serde_json::from_slice::<Value>(&audio.2).unwrap()["id"].as_str().unwrap().to_string();
+    let rule = a.json("POST", "/api/rules", "alice", Some(json!({ "pattern": MARK, "tag": "alicetag" }))).await.1["id"].as_str().unwrap().to_string();
     let (s, _, _) = a.call("POST", "/api/suggest/feedback", "alice", Some(json!({ "tag": "alicetag", "action": "accepted", "confidence": 0.9 }))).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     Fixture { note, todo, reminder, image, audio, rule }
@@ -171,14 +171,14 @@ async fn attack(a: &App, user: &str, f: &Fixture) {
     assert_eq!(a.json("POST", "/api/rules/apply", user, None).await.1["changed"], 0);
     assert_eq!(a.call("DELETE", &format!("/api/rules/{}", f.rule), user, None).await.0, StatusCode::NOT_FOUND);
     // changing and deleting her cards
-    for id in [f.note, f.todo, f.reminder] {
+    for id in [&f.note, &f.todo, &f.reminder] {
         assert_eq!(a.call("PUT", &format!("/api/notes/{id}"), user, Some(json!({ "body": "hacked" }))).await.0, StatusCode::NOT_FOUND, "{user} PUT {id}");
         assert_eq!(a.call("DELETE", &format!("/api/notes/{id}"), user, None).await.0, StatusCode::NOT_FOUND, "{user} DELETE {id}");
-        assert_eq!(a.call("POST", &format!("/api/notes/{id}/move"), user, Some(json!({ "prev": null, "next": 999_999 }))).await.0, StatusCode::NOT_FOUND, "{user} move {id}");
+        assert_eq!(a.call("POST", &format!("/api/notes/{id}/move"), user, Some(json!({ "prev": null, "next": "7ZZZZZZZZZZZZZZZZZZZZZZZZZ" }))).await.0, StatusCode::NOT_FOUND, "{user} move {id}");
         assert_eq!(a.raw("POST", &format!("/api/notes/{id}/attachments"), Some(user), &[], jpeg(9)).await.0, StatusCode::NOT_FOUND, "{user} attach to {id}");
     }
     // her files
-    for id in [f.image, f.audio] {
+    for id in [&f.image, &f.audio] {
         for uri in [format!("/api/media/{id}"), format!("/api/media/{id}?thumb=true"), format!("/api/media/{id}?v=anything")] {
             assert_eq!(a.call("GET", &uri, user, None).await.0, StatusCode::NOT_FOUND, "{user} GET {uri}");
         }
@@ -210,7 +210,7 @@ async fn alice_is_intact(a: &App, f: &Fixture) {
     let note = notes.iter().find(|n| n["id"] == f.note).unwrap();
     assert_eq!(note["attachments"].as_array().unwrap().len(), 2);
     assert_eq!(a.json("GET", "/api/rules", "alice", None).await.1["rules"].as_array().unwrap().len(), 1);
-    for id in [f.image, f.audio] {
+    for id in [&f.image, &f.audio] {
         assert_eq!(a.call("GET", &format!("/api/media/{id}"), "alice", None).await.0, StatusCode::OK);
     }
     let r = a.call("GET", "/api/me/export", "alice", None).await;
@@ -289,7 +289,7 @@ async fn admins_see_accounts_but_never_content() {
     alice_is_intact(&a, &f).await;
 
     // deleting an account removes its data and its files, and nothing of anyone else's
-    let bob_card = a.json("POST", "/api/notes", "bob", Some(json!({ "body": "bob's card" }))).await.1["id"].as_i64().unwrap();
+    let bob_card = a.json("POST", "/api/notes", "bob", Some(json!({ "body": "bob's card" }))).await.1["id"].as_str().unwrap().to_string();
     a.raw("POST", &format!("/api/notes/{bob_card}/attachments"), Some("bob"), &[], jpeg(5)).await;
     assert_eq!(a.files(), 3, "alice's picture and audio, bob's picture");
     assert_eq!(a.call("POST", "/api/admin/users/delete", "root", Some(json!({ "id": "alice" }))).await.0, StatusCode::NO_CONTENT);
@@ -350,7 +350,7 @@ async fn my_data_export_and_account_deletion() {
 async fn unauthenticated_requests_are_refused_everywhere() {
     let a = app("anon");
     let f = alice_data(&a).await;
-    let m = f.image;
+    let m = f.image.clone();
     for (method, uri) in [
         ("GET", "/api/notes".to_string()),
         ("POST", "/api/notes".to_string()),

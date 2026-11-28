@@ -162,7 +162,7 @@ impl MoveError {
 }
 
 /// Checks a move request that needs no stored data. Call after confirming the card is the caller's.
-pub fn check_request(id: i64, prev: Option<i64>, next: Option<i64>) -> Result<(), MoveError> {
+pub fn check_request(id: &str, prev: Option<&str>, next: Option<&str>) -> Result<(), MoveError> {
     if prev.is_none() && next.is_none() {
         return Err(MoveError::NoNeighbour);
     }
@@ -318,10 +318,10 @@ mod tests {
 
     #[test]
     fn move_rules() {
-        assert_eq!(check_request(1, None, None), Err(MoveError::NoNeighbour));
-        assert_eq!(check_request(1, Some(1), None), Err(MoveError::OwnNeighbour));
-        assert_eq!(check_request(1, None, Some(1)), Err(MoveError::OwnNeighbour));
-        assert!(check_request(1, Some(2), None).is_ok());
+        assert_eq!(check_request("1", None, None), Err(MoveError::NoNeighbour));
+        assert_eq!(check_request("1", Some("1"), None), Err(MoveError::OwnNeighbour));
+        assert_eq!(check_request("1", None, Some("1")), Err(MoveError::OwnNeighbour));
+        assert!(check_request("1", Some("2"), None).is_ok());
         assert_eq!(check_neighbours(false, Some(("e", true)), None), Err(MoveError::OtherGroup));
         assert_eq!(check_neighbours(true, None, Some(("e", false))), Err(MoveError::OtherGroup));
         assert_eq!(check_neighbours(false, Some(("b", false)), Some(("e", false))), Err(MoveError::WrongOrder));
