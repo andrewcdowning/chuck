@@ -1,4 +1,4 @@
-use super::{env, sanitize_owner, Authenticator};
+use super::{env, sanitize_name, sanitize_owner, Authenticator, Identity};
 use axum::http::{HeaderMap, HeaderName};
 
 /// Constant-time equality for secrets (length is not secret here).
@@ -47,6 +47,8 @@ pub struct TrustedHeader {
     user_header: HeaderName,
     secret_header: HeaderName,
     secret: String,
+    /// Optional header carrying a display name (`CHUCK_AUTH_NAME_HEADER`).
+    name_header: Option<HeaderName>,
 }
 
 impl TrustedHeader {
@@ -58,26 +60,37 @@ impl TrustedHeader {
         if secret.len() < 16 {
             return Err("CHUCK_AUTH_SECRET must be at least 16 characters".into());
         }
+        let name_header = match env("CHUCK_AUTH_NAME_HEADER") {
+            Some(h) => Some(h.parse::<HeaderName>().map_err(|e| format!("CHUCK_AUTH_NAME_HEADER: {e}"))?),
+            None => None,
+        };
         Ok(Self {
             user_header: name("CHUCK_AUTH_HEADER", "x-forwarded-user")?,
             secret_header: name("CHUCK_AUTH_SECRET_HEADER", "x-chuck-proxy-secret")?,
             secret,
+            name_header,
         })
     }
 
     #[cfg(test)]
     fn new(user: &str, secret_header: &str, secret: &str) -> Self {
-        Self { user_header: user.parse().unwrap(), secret_header: secret_header.parse().unwrap(), secret: secret.into() }
+        Self { user_header: user.parse().unwrap(), secret_header: secret_header.parse().unwrap(), secret: secret.into(), name_header: Some("x-user-name".parse().unwrap()) }
     }
 }
 
 impl Authenticator for TrustedHeader {
     fn authenticate(&self, headers: &HeaderMap) -> Option<String> {
+        self.identity(headers).map(|i| i.id)
+    }
+
+    fn identity(&self, headers: &HeaderMap) -> Option<Identity> {
         let presented = headers.get(&self.secret_header)?.to_str().ok()?;
         if !ct_eq(presented, &self.secret) {
             return None;
         }
-        sanitize_owner(headers.get(&self.user_header)?.to_str().ok()?)
+        let id = sanitize_owner(headers.get(&self.user_header)?.to_str().ok()?)?;
+        let name = self.name_header.as_ref().and_then(|h| headers.get(h)).and_then(|v| v.to_str().ok()).and_then(sanitize_name);
+        Some(Identity { id, name })
     }
 }
 
@@ -100,6 +113,16 @@ mod tests {
         assert!(a.authenticate(&h(&[("x-user", "alice")])).is_none());
         assert!(a.authenticate(&h(&[("x-user", "alice"), ("x-secret", "wrong")])).is_none());
         assert!(a.authenticate(&h(&[("x-secret", "0123456789abcdef")])).is_none());
+        // a display name is optional and sanitized
+        let ok = [("x-user", "alice"), ("x-secret", "0123456789abcdef")];
+        assert_eq!(a.identity(&h(&ok)), Some(Identity { id: "alice".into(), name: None }));
+        let mut named = ok.to_vec();
+        named.push(("x-user-name", "  Alice Example "));
+        assert_eq!(a.identity(&h(&named)).unwrap().name.as_deref(), Some("Alice Example"));
+        let long = "x".repeat(81);
+        let mut bad = ok.to_vec();
+        bad.push(("x-user-name", &long));
+        assert_eq!(a.identity(&h(&bad)).unwrap().name, None, "overlong names are dropped, not trusted");
     }
 
     #[test]

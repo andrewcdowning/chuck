@@ -95,6 +95,38 @@ pub struct TagCount {
     pub count: i64,
 }
 
+/// A person using this Chuck. Created the first time their identity is seen.
+#[derive(Debug, Clone, Serialize)]
+pub struct User {
+    pub id: String,
+    pub display_name: Option<String>,
+    /// "user" or "admin". Admins manage accounts; they have no access to anyone's content.
+    pub role: String,
+    /// "active" or "disabled". A disabled account is refused on every request; its data stays until deleted.
+    pub status: String,
+    pub created_at: i64,
+    pub last_seen_at: Option<i64>,
+}
+
+/// What an admin sees about an account: counts and sizes, never content.
+#[derive(Debug, Clone, Serialize)]
+pub struct UserSummary {
+    #[serde(flatten)]
+    pub user: User,
+    pub notes: i64,
+    pub attachments: i64,
+    /// Total size of the account's stored files (previews not counted).
+    pub storage_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedbackEvent {
+    pub tag: String,
+    pub action: String,
+    pub confidence: f64,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Rule {
     pub id: i64,
@@ -159,6 +191,16 @@ pub trait NoteStore: Send + Sync + 'static {
     /// True if any of the owner's attachments still uses this storage key (as a file or a preview).
     fn blob_referenced(&self, owner: &str, key: &str) -> Result<bool>;
 
+    // ---- accounts
+    /// Called on every authenticated request. Creates the account on first sight, keeps the role in step with the
+    /// configured admin list, remembers the display name, and records activity (at most every few minutes).
+    fn touch_user(&self, id: &str, display_name: Option<&str>, admin: bool) -> Result<User>;
+    fn list_users(&self) -> Result<Vec<UserSummary>>;
+    fn set_user_active(&self, id: &str, active: bool) -> Result<User>;
+    /// Removes the account and everything it owns. Returns the storage keys of its files so the caller can delete them.
+    fn delete_user(&self, id: &str) -> Result<Vec<String>>;
+    /// The owner's accepted and dismissed tag suggestions, oldest first (part of their own data export).
+    fn feedback_events(&self, owner: &str) -> Result<Vec<FeedbackEvent>>;
 }
 
 /// Parses `- [ ] text`, `* [x] text` (leading whitespace allowed). Returns (done, text).

@@ -19,6 +19,22 @@ port published on 127.0.0.1).
 
 Note: the HTML shell at `/` is served without authentication. It contains no data; every `/api/*` call is authenticated.
 
+## Accounts and administrators
+
+Each user id gets an account on its first authenticated request. Accounts are strictly separate: nobody, including an
+administrator, can read another account's notes, files or rules. Administrators are the ids listed in `CHUCK_ADMINS`
+(comma separated; with `CHUCK_AUTH=local` the user `local` is an administrator). The role is re-read from the config on
+every request. An administrator can see each account's counts and storage size, disable or enable it, and delete it
+(never their own account). A disabled account gets 401 "this account is disabled" on every endpoint. Chuck logs a
+warning at start-up if no administrator is configured.
+
+Users can export everything they own (`GET /api/me/export`, a ZIP) and delete their own account (`DELETE /api/me` with
+`{"confirm": "<own id>"}`). A deleted account is erased completely; signing in again creates a new empty account, so to
+keep someone out, disable the account instead.
+
+Custom providers can implement `Authenticator::identity` (returns `Identity { id, name }`) to supply a display name;
+the default calls `authenticate` and has no name. For `jwt`, `CHUCK_JWT_NAME_CLAIM` (default `name`) names the claim.
+
 ## `header`: trust an identity header from a proxy
 
 A header alone is forgeable by anyone who can reach Chuck. So a request is accepted only if it also carries a shared secret
@@ -30,6 +46,7 @@ header that the proxy adds. Keep the secret where users cannot read it (a CloudF
 | `CHUCK_AUTH_SECRET` | required, 16+ chars | Shared secret the proxy sends. |
 | `CHUCK_AUTH_SECRET_HEADER` | `x-chuck-proxy-secret` | Header carrying the secret. |
 | `CHUCK_AUTH_HEADER` | `x-forwarded-user` | Header carrying the user id (login name, email, employee id). |
+| `CHUCK_AUTH_NAME_HEADER` | unset | Optional header with a display name (shown in the account panel; max 80 chars). |
 
 CloudFront pattern: CloudFront adds the secret as a custom origin header. An edge function (Lambda@Edge, or a CloudFront
 Function if the identity is already in the viewer request) authenticates the viewer with your SSO and sets the user header.

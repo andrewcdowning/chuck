@@ -1,7 +1,7 @@
 use crate::auth::Authenticator;
 use crate::blob::{self, BlobStore};
 use crate::media::{self, MediaError};
-use crate::store::{normalize_tag, NewAttachment, NoteInput, NoteQuery, NoteStore, RuleInput, StoreError, REPEATS};
+use crate::store::{normalize_tag, NewAttachment, NoteInput, NoteQuery, NoteStore, RuleInput, StoreError, User, REPEATS};
 use serde::Deserialize;
 use axum::{
     body::Bytes,
@@ -11,6 +11,7 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -18,9 +19,32 @@ pub struct AppState {
     pub store: Arc<dyn NoteStore>,
     pub auth: Arc<dyn Authenticator>,
     pub blobs: Arc<dyn BlobStore>,
+    /// Owner ids that are administrators (`CHUCK_ADMINS`). Admins manage accounts; they cannot read anyone's content.
+    pub admins: Arc<HashSet<String>>,
+}
+
+impl AppState {
+    /// No administrators.
+    pub fn new(store: Arc<dyn NoteStore>, auth: Arc<dyn Authenticator>, blobs: Arc<dyn BlobStore>) -> Self {
+        Self { store, auth, blobs, admins: Arc::new(HashSet::new()) }
+    }
 }
 
 const MAX_BODY: usize = 20_000;
+
+/// Turns away anonymous requests to /api before any body or query is parsed, so a malformed request cannot learn
+/// anything (such as a 422 that shows which route exists) without signing in. Handlers still do the full check.
+async fn require_identity(
+    axum::extract::State(s): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if req.uri().path().starts_with("/api/") && s.auth.identity(req.headers()).is_none() {
+        return ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()).into_response();
+    }
+    next.run(req).await
+}
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -29,6 +53,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notes", get(list).post(create))
         .route("/api/notes/:id", put(update).delete(remove))
         .route("/api/notes/:id/move", post(move_note))
+        .route("/api/me", get(me).delete(delete_me))
+        .route("/api/me/export", get(export_me))
+        .route("/api/admin/users", get(admin_users))
+        .route("/api/admin/users/status", post(admin_user_status))
+        .route("/api/admin/users/delete", post(admin_delete_user))
         .route("/api/tags", get(tags))
         .route("/api/export", get(export))
         .route("/api/suggest", post(suggest))
@@ -42,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/media/:id", get(get_media).delete(delete_media))
         .route("/api/media/:id/thumb", put(put_thumb).layer(DefaultBodyLimit::max(media::MAX_THUMB_BYTES + 1024)))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), require_identity))
         .with_state(state)
 }
 
@@ -66,14 +96,35 @@ impl From<StoreError> for ApiError {
     }
 }
 
-/// Authentication may fetch signing keys over the network, so it runs on a blocking thread.
+/// Who is calling, as an account. Authentication may fetch signing keys over the network, and the account is looked
+/// up (and created on first sight), so all of it runs on a blocking thread. A disabled account is refused here, which
+/// is what makes "disabled" apply to every endpoint.
+async fn session(s: &AppState, h: &HeaderMap) -> Result<User, ApiError> {
+    let (auth, store, admins, headers) = (s.auth.clone(), s.store.clone(), s.admins.clone(), h.clone());
+    let found = tokio::task::spawn_blocking(move || -> Result<Option<User>, StoreError> {
+        let Some(who) = auth.identity(&headers) else { return Ok(None) };
+        let admin = admins.contains(&who.id);
+        store.touch_user(&who.id, who.name.as_deref(), admin).map(Some)
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    let user = found.ok_or(ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()))?;
+    if user.status != "active" {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "this account is disabled".into()));
+    }
+    Ok(user)
+}
+
 async fn owner(s: &AppState, h: &HeaderMap) -> Result<String, ApiError> {
-    let (auth, headers) = (s.auth.clone(), h.clone());
-    tokio::task::spawn_blocking(move || auth.authenticate(&headers))
-        .await
-        .ok()
-        .flatten()
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()))
+    Ok(session(s, h).await?.id)
+}
+
+async fn admin(s: &AppState, h: &HeaderMap) -> Result<User, ApiError> {
+    let u = session(s, h).await?;
+    if u.role != "admin" {
+        return Err(ApiError(StatusCode::FORBIDDEN, "administrators only".into()));
+    }
+    Ok(u)
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> crate::store::Result<T> + Send + 'static) -> Result<T, ApiError> {
@@ -489,4 +540,132 @@ mod range_tests {
         assert_eq!(parse_range("bytes=x-", 1000), None);
         assert_eq!(parse_range("bytes=-5000", 1000), Some((0, 999)));
     }
+}
+
+// ---------------------------------------------------------------- accounts
+
+async fn me(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(session(&s, &h).await?))
+}
+
+/// Everything the account owns, as one ZIP: notes (JSON and Markdown), tag rules, suggestion feedback, and the original
+/// files. Built in memory, so for now it is limited to 1 GB of files.
+async fn export_me(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
+    const MAX_FILES_BYTES: i64 = 1 << 30;
+    let o = owner(&s, &h).await?;
+    let (st, blobs) = (s.store.clone(), s.blobs.clone());
+    let (zip, date) = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, String), ApiError> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let mut notes = Vec::new();
+        loop {
+            let q = NoteQuery { limit: Some(200), offset: Some(notes.len() as u32), ..Default::default() };
+            let page = st.list(&o, &q)?;
+            let n = page.len();
+            notes.extend(page);
+            if n < 200 {
+                break;
+            }
+        }
+        let total: i64 = notes.iter().flat_map(|n| n.attachments.iter()).map(|a| a.bytes).sum();
+        if total > MAX_FILES_BYTES {
+            return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "your files are over 1 GB, too large to download in one piece for now; ask the administrator".into()));
+        }
+        let zerr = |e: String| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e);
+        let mut z = crate::zip::ZipWriter::new();
+        z.add("README.txt", format!(
+            "Your Chuck data, exported {}.\n\nnotes.json      every card with its tags, dates, reminders and attachment details\nnotes.md        the same cards as readable Markdown\nrules.json      your auto-tag rules\nsuggestion-feedback.json  the tag suggestions you accepted or dismissed\nattachments/    your original pictures and audio, named <id>-<file name>\n",
+            crate::export::fmt_utc(now)
+        ).as_bytes(), now).map_err(zerr)?;
+        z.add("notes.json", &pretty(&notes), now).map_err(zerr)?;
+        z.add("notes.md", crate::export::to_markdown(&notes, now).as_bytes(), now).map_err(zerr)?;
+        z.add("rules.json", &pretty(&st.rules(&o)?), now).map_err(zerr)?;
+        z.add("suggestion-feedback.json", &pretty(&st.feedback_events(&o)?), now).map_err(zerr)?;
+        for a in notes.iter().flat_map(|n| n.attachments.iter()) {
+            let bytes = blobs.get(&a.blob_key).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("reading file {}: {e}", a.id)))?;
+            let name = clean_name(a.name.clone()).unwrap_or_else(|| "file".into());
+            z.add(&format!("attachments/{}-{}", a.id, name.replace('/', "_")), &bytes, now).map_err(zerr)?;
+        }
+        Ok((z.finish().map_err(zerr)?, crate::export::fmt_date(now)))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"chuck-data-{date}.zip\"")),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        zip,
+    ))
+}
+
+fn pretty<T: serde::Serialize>(v: &T) -> Vec<u8> {
+    serde_json::to_vec_pretty(v).unwrap_or_default()
+}
+
+#[derive(Deserialize)]
+struct ConfirmInput {
+    /// Must equal the account id: deleting is permanent.
+    confirm: String,
+}
+
+/// Deletes the caller's own account and all of its data and files. Signing in again starts a new, empty account.
+async fn delete_me(State(s): State<AppState>, h: HeaderMap, Json(b): Json<ConfirmInput>) -> Result<impl IntoResponse, ApiError> {
+    let me = session(&s, &h).await?;
+    if b.confirm != me.id {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "type your account name to confirm".into()));
+    }
+    erase_account(&s, &me.id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn erase_account(s: &AppState, id: &str) -> Result<(), ApiError> {
+    let (st, blobs, id) = (s.store.clone(), s.blobs.clone(), id.to_string());
+    blocking(move || {
+        let keys = st.delete_user(&id)?;
+        for k in keys {
+            if let Err(e) = blobs.delete(&k) {
+                eprintln!("could not delete blob {k}: {e}");
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Accounts with counts and sizes. Never any content.
+async fn admin_users(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
+    admin(&s, &h).await?;
+    let st = s.store.clone();
+    Ok(Json(blocking(move || st.list_users()).await?))
+}
+
+#[derive(Deserialize)]
+struct StatusInput {
+    id: String,
+    active: bool,
+}
+
+async fn admin_user_status(State(s): State<AppState>, h: HeaderMap, Json(b): Json<StatusInput>) -> Result<impl IntoResponse, ApiError> {
+    let me = admin(&s, &h).await?;
+    if b.id == me.id {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "you cannot disable your own account".into()));
+    }
+    let st = s.store.clone();
+    Ok(Json(blocking(move || st.set_user_active(&b.id, b.active)).await?))
+}
+
+#[derive(Deserialize)]
+struct IdInput {
+    id: String,
+}
+
+/// Deletes another account and everything it owns. To keep someone out without deleting, disable the account.
+async fn admin_delete_user(State(s): State<AppState>, h: HeaderMap, Json(b): Json<IdInput>) -> Result<impl IntoResponse, ApiError> {
+    let me = admin(&s, &h).await?;
+    if b.id == me.id {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "to delete your own account use Delete my account".into()));
+    }
+    erase_account(&s, &b.id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
