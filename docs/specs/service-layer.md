@@ -1,6 +1,6 @@
 # Spec: service layer and the three planes
 
-Status: draft for review. Nothing here is built.
+Status: approved. Decisions D1 to D6 were taken as recommended. Phase 0 is in progress; later phases are not built.
 
 Fixes findings A1 to A7 and B1 to B8 in [../ARCHITECTURE-REVIEW.md](../ARCHITECTURE-REVIEW.md), and prepares the split into
 packages needed for API Gateway and Lambda.
@@ -153,7 +153,9 @@ is the safety net for the rest.
 
 Optional and breaking, decided separately: opaque string ids (B4, decision D1).
 
-## Decisions needed
+## Decisions
+
+All six were taken as recommended (approved by the project owner).
 
 - **D1 ids.** Keep `i64` ids (no API change, SQLite-shaped) or move to opaque string ids (ULIDs) before the cloud store.
   Recommended: opaque ids, as its own PR after phase 2, with the page and tests updated together.
