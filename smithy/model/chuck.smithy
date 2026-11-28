@@ -34,6 +34,7 @@ service Chuck {
         ListUsers
         SetUserStatus
         DeleteUser
+        SweepOrphans
     ]
 }
 
@@ -764,4 +765,28 @@ operation DeleteUser {
     }
     output := {}
     errors: [BadRequest, Unauthorized, Forbidden, NotFound, InternalError]
+}
+
+/// Deletes stored files that no card refers to and that have not been written for ten minutes (files of deleted cards and
+/// attachments, replaced previews, leftovers of interrupted uploads). Also runs on a schedule. Reports counts only.
+@http(method: "POST", uri: "/api/admin/maintenance/sweep")
+operation SweepOrphans {
+    output := {
+        /// Files looked at.
+        @required
+        scanned: Integer
+
+        /// Unused files deleted.
+        @required
+        removed: Integer
+
+        /// Unused files left alone because they were written too recently.
+        @required
+        too_new: Integer
+
+        /// Files that could not be deleted; they are tried again next time.
+        @required
+        failed: Integer
+    }
+    errors: [Unauthorized, Forbidden, InternalError]
 }

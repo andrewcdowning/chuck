@@ -119,6 +119,8 @@ pub trait OwnerRecords: Send + Sync + 'static {
     fn usage(&self, owner: &str) -> Result<Usage>;
     /// Storage keys of all of the owner's files and previews, without duplicates.
     fn blob_keys(&self, owner: &str) -> Result<Vec<String>>;
+    /// Storage keys used by anyone's files and previews. What the orphan sweeper treats as in use.
+    fn all_blob_keys(&self) -> Result<Vec<String>>;
     /// Removes everything the owner has from the data plane (cards, tags, attachments, rules, suggestion feedback) and
     /// forgets anything derived from it. Does nothing if there is nothing left. Does not touch the account record.
     fn purge_rows(&self, owner: &str) -> Result<()>;

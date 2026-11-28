@@ -1,7 +1,26 @@
 # Architecture review
 
-Status: findings only. Nothing listed here has been fixed yet. The plan for the larger items is in
-[specs/service-layer.md](specs/service-layer.md).
+Status: the findings below describe the code as it was when the review was written (PR #19). What has been done since,
+under [specs/service-layer.md](specs/service-layer.md):
+
+| Finding | Now |
+| --- | --- |
+| A1 one counter retrains every model | Fixed (PR #24): versions per owner, bounded cache |
+| A2 N+1 queries in `list()` | Fixed (PR #23): tags and attachments are loaded per page. Not measured |
+| A3 dangling-attachment race | Fixed (phase 5): no inline deletes; a sweeper deletes only unused files that are older than ten minutes, and storing an existing file refreshes its time. A window of microseconds remains between the sweeper's last check and its delete |
+| A4 `NoteStore` too big | Partly (PR #25): accounts and admin are separate traits. Cards, rules, attachments and suggestions are still one trait |
+| A5 per-request work | Fixed (PR #25): one authentication per request, account cached for 30 seconds |
+| A6 ad-hoc migrations | Fixed (phase 5): numbered steps in `PRAGMA user_version` |
+| A7 blanket error conversion | Open |
+| A8 minor items | Open |
+| B1 rules inside `sqlite.rs` | Fixed (PRs #22, #23): `domain` and `NoteService` |
+| B2 ordering and paging are SQL tricks | Open: positions are still floats (decision D2) |
+| B3 search contract | Fixed (PR #21): stated and tested for every backend |
+| B4 ids are rowids | Open (decision D1) |
+| B5 tag model welded to the store | Fixed (PR #24) |
+| B6 storage keys in the domain | Open |
+| B7 transaction assumptions | Fixed (PR #23): `transact` |
+| B8 clock and sync trait | Partly: services take a clock; the traits are still synchronous (decision D4) |
 
 Scope: the Rust server (`src/`), its tests, and the single-page UI (`static/index.html`), as of the merge of PR #19.
 Method: reading the code. No profiler was run, so the performance items describe what the code implies, not measured

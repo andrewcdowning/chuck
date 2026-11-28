@@ -1,4 +1,5 @@
 use crate::auth::Authenticator;
+use crate::admin::{AdminError, AdminService};
 use crate::blob::{self, BlobStore};
 use crate::control::{AccountRecords, AccountService, AccountStatus, OwnerPurger, OwnerRecords, Principal, DEFAULT_ACCOUNT_CACHE};
 use crate::media::{self, MediaError};
@@ -24,6 +25,8 @@ pub struct AppState {
     pub blobs: Arc<dyn BlobStore>,
     /// The control plane: resolves identities to accounts and manages their lifecycle.
     pub accounts: Arc<AccountService>,
+    /// The management plane: account administration and maintenance.
+    pub admin: Arc<AdminService>,
     admins: Arc<HashSet<String>>,
     account_cache: Duration,
 }
@@ -32,29 +35,31 @@ impl AppState {
     /// No administrators; account status is cached for `control::DEFAULT_ACCOUNT_CACHE`.
     pub fn new(store: Arc<dyn NoteStore>, auth: Arc<dyn Authenticator>, blobs: Arc<dyn BlobStore>) -> Self {
         let admins = Arc::new(HashSet::new());
-        let accounts = Self::build(&store, &blobs, &admins, DEFAULT_ACCOUNT_CACHE);
-        Self { store, auth, blobs, accounts, admins, account_cache: DEFAULT_ACCOUNT_CACHE }
+        let (accounts, admin) = Self::build(&store, &blobs, &admins, DEFAULT_ACCOUNT_CACHE);
+        Self { store, auth, blobs, accounts, admin, admins, account_cache: DEFAULT_ACCOUNT_CACHE }
     }
 
     /// Owner ids that are administrators (`CHUCK_ADMINS`). Admins manage accounts; they cannot read anyone's content.
     pub fn with_admins(mut self, admins: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.admins = Arc::new(admins.into_iter().map(Into::into).collect());
-        self.accounts = Self::build(&self.store, &self.blobs, &self.admins, self.account_cache);
+        (self.accounts, self.admin) = Self::build(&self.store, &self.blobs, &self.admins, self.account_cache);
         self
     }
 
     /// How long a resolved account is reused before its record is read again (default 30 seconds).
     pub fn with_account_cache(mut self, ttl: Duration) -> Self {
         self.account_cache = ttl;
-        self.accounts = Self::build(&self.store, &self.blobs, &self.admins, ttl);
+        (self.accounts, self.admin) = Self::build(&self.store, &self.blobs, &self.admins, ttl);
         self
     }
 
-    fn build(store: &Arc<dyn NoteStore>, blobs: &Arc<dyn BlobStore>, admins: &HashSet<String>, ttl: Duration) -> Arc<AccountService> {
+    fn build(store: &Arc<dyn NoteStore>, blobs: &Arc<dyn BlobStore>, admins: &HashSet<String>, ttl: Duration) -> (Arc<AccountService>, Arc<AdminService>) {
         let accounts: Arc<dyn AccountRecords> = store.clone();
         let records: Arc<dyn OwnerRecords> = store.clone();
-        let data = Arc::new(OwnerPurger::new(records, blobs.clone()));
-        Arc::new(AccountService::new(accounts, data).with_admins(admins.iter().cloned()).with_cache_ttl(ttl))
+        let data = Arc::new(OwnerPurger::new(records.clone(), blobs.clone()));
+        let accounts = Arc::new(AccountService::new(accounts, data).with_admins(admins.iter().cloned()).with_cache_ttl(ttl));
+        let admin = Arc::new(AdminService::new(accounts.clone(), records, blobs.clone()));
+        (accounts, admin)
     }
 }
 
@@ -114,6 +119,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/users", get(admin_users))
         .route("/api/admin/users/status", post(admin_user_status))
         .route("/api/admin/users/delete", post(admin_delete_user))
+        .route("/api/admin/maintenance/sweep", post(admin_sweep))
         .route("/api/tags", get(tags))
         .route("/api/export", get(export))
         .route("/api/suggest", post(suggest))
@@ -136,6 +142,16 @@ pub struct ApiError(StatusCode, String);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<AdminError> for ApiError {
+    fn from(e: AdminError) -> Self {
+        match e {
+            AdminError::Forbidden => ApiError(StatusCode::FORBIDDEN, "administrators only".into()),
+            AdminError::Invalid(m) => ApiError(StatusCode::BAD_REQUEST, m),
+            AdminError::Store(e) => e.into(),
+        }
     }
 }
 
@@ -196,15 +212,9 @@ async fn update(State(s): State<AppState>, p: Principal, Path(id): Path<i64>, Js
 
 async fn remove(State(s): State<AppState>, p: Principal, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
-    let (st, blobs) = (s.store.clone(), s.blobs.clone());
-    blocking(move || {
-        let note = st.get(&o, id)?;
-        st.delete(&o, id)?;
-        let keys = note.attachments.into_iter().flat_map(|a| std::iter::once(a.blob_key).chain(a.thumb_key)).collect();
-        collect_garbage(&*st, &*blobs, &o, keys);
-        Ok(())
-    })
-    .await?;
+    let st = s.store.clone();
+    // The files go with the card's last use; the sweeper deletes them once nothing refers to them.
+    blocking(move || st.delete(&o, id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -335,20 +345,6 @@ impl From<MediaError> for ApiError {
 
 /// Deletes stored files that no attachment of this owner uses any more. Failures are logged, not returned: the
 /// database change has already happened, and a leftover file is harmless.
-fn collect_garbage(st: &dyn NoteStore, blobs: &dyn BlobStore, owner: &str, keys: Vec<String>) {
-    for k in keys {
-        match st.blob_referenced(owner, &k) {
-            Ok(false) => {
-                if let Err(e) = blobs.delete(&k) {
-                    eprintln!("could not delete blob {k}: {e}");
-                }
-            }
-            Ok(true) => {}
-            Err(_) => eprintln!("could not check blob {k}"),
-        }
-    }
-}
-
 #[derive(Deserialize)]
 struct AttachQuery {
     name: Option<String>,
@@ -384,10 +380,7 @@ async fn add_attachment(State(s): State<AppState>, p: Principal, Path(note_id): 
         };
         match st.add_attachment(&o, note_id, &new) {
             Ok(a) => Ok(a),
-            Err(e) => {
-                collect_garbage(&*st, &*blobs, &o, vec![key]);
-                Err(e.into())
-            }
+            Err(e) => Err(e.into()), // the stored file is deleted by the sweeper if nothing else uses it
         }
     })
     .await
@@ -407,8 +400,7 @@ async fn put_thumb(State(s): State<AppState>, p: Principal, Path(id): Path<i64>,
         }
         let key = blob::key_for(&o, &c.bytes);
         blobs.put(&key, &c.bytes).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("storing file: {e}")))?;
-        let old = st.set_attachment_thumb(&o, id, &key)?;
-        collect_garbage(&*st, &*blobs, &o, old.into_iter().collect());
+        st.set_attachment_thumb(&o, id, &key)?; // the replaced preview is deleted by the sweeper
         Ok(())
     })
     .await
@@ -485,13 +477,8 @@ async fn get_media(State(s): State<AppState>, p: Principal, h: HeaderMap, Path(i
 
 async fn delete_media(State(s): State<AppState>, p: Principal, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
-    let (st, blobs) = (s.store.clone(), s.blobs.clone());
-    blocking(move || {
-        let a = st.delete_attachment(&o, id)?;
-        collect_garbage(&*st, &*blobs, &o, std::iter::once(a.blob_key).chain(a.thumb_key).collect());
-        Ok(())
-    })
-    .await?;
+    let st = s.store.clone();
+    blocking(move || st.delete_attachment(&o, id).map(|_| ())).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -636,9 +623,10 @@ async fn erase_account(s: &AppState, id: &str) -> Result<(), ApiError> {
 }
 
 /// Accounts with counts and sizes. Never any content.
-async fn admin_users(State(s): State<AppState>, _admin: Principal) -> Result<impl IntoResponse, ApiError> {
-    let accounts = s.accounts.clone();
-    Ok(Json(serde_json::json!({ "users": blocking(move || accounts.summaries()).await? })))
+async fn admin_users(State(s): State<AppState>, me: Principal) -> Result<impl IntoResponse, ApiError> {
+    let admin = s.admin.clone();
+    let users = tokio::task::spawn_blocking(move || admin.accounts(&me)).await.map_err(join_error)??;
+    Ok(Json(serde_json::json!({ "users": users })))
 }
 
 #[derive(Deserialize)]
@@ -648,11 +636,8 @@ struct StatusInput {
 }
 
 async fn admin_user_status(State(s): State<AppState>, me: Principal, Json(b): Json<StatusInput>) -> Result<impl IntoResponse, ApiError> {
-    if b.id == me.id {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "you cannot disable your own account".into()));
-    }
-    let accounts = s.accounts.clone();
-    Ok(Json(blocking(move || accounts.set_active(&b.id, b.active)).await?))
+    let admin = s.admin.clone();
+    Ok(Json(tokio::task::spawn_blocking(move || admin.set_active(&me, &b.id, b.active)).await.map_err(join_error)??))
 }
 
 #[derive(Deserialize)]
@@ -662,9 +647,17 @@ struct IdInput {
 
 /// Deletes another account and everything it owns. To keep someone out without deleting, disable the account.
 async fn admin_delete_user(State(s): State<AppState>, me: Principal, Json(b): Json<IdInput>) -> Result<impl IntoResponse, ApiError> {
-    if b.id == me.id {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "to delete your own account use Delete my account".into()));
-    }
-    erase_account(&s, &b.id).await?;
+    let admin = s.admin.clone();
+    tokio::task::spawn_blocking(move || admin.delete_account(&me, &b.id)).await.map_err(join_error)??;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Deletes stored files that no card refers to. Reports counts only.
+async fn admin_sweep(State(s): State<AppState>, me: Principal) -> Result<impl IntoResponse, ApiError> {
+    let admin = s.admin.clone();
+    Ok(Json(tokio::task::spawn_blocking(move || admin.sweep(&me)).await.map_err(join_error)??))
+}
+
+fn join_error(e: tokio::task::JoinError) -> ApiError {
+    ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }

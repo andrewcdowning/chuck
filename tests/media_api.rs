@@ -20,13 +20,14 @@ impl Authenticator for HeaderUser {
 struct App {
     router: axum::Router,
     media: PathBuf,
+    admin: Arc<chuck::admin::AdminService>,
 }
 
 fn app(name: &str) -> App {
     let media = std::env::temp_dir().join(format!("chuck-media-test-{name}-{}", std::process::id()));
     std::fs::remove_dir_all(&media).ok();
     let state = api::AppState::new(Arc::new(SqliteStore::open(":memory:").unwrap()), Arc::new(HeaderUser), Arc::new(FsBlobStore::open(&media).unwrap()));
-    App { router: api::router(state), media }
+    App { admin: state.admin.clone(), router: api::router(state), media }
 }
 
 impl App {
@@ -191,12 +192,17 @@ async fn files_dedupe_per_user_and_are_cleaned_up() {
     a.attach("bob", cb, jpeg(1), "same.jpg").await;
     assert_eq!(a.files(), 2, "same file twice for alice is stored once; bob gets his own copy");
 
-    // removing one of alice's two uses keeps the file; removing the last use deletes it
+    // removing one of alice's two uses keeps the file; removing the last use leaves it for the sweeper
     let (s, _, _) = a.call("DELETE", &format!("/api/media/{a1}"), Some("alice"), vec![], false).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
-    assert_eq!(a.files(), 2);
+    assert_eq!(a.admin.sweep_unattended(0).unwrap().removed, 0);
+    assert_eq!(a.files(), 2, "still used by the other card");
     let (s, _, _) = a.call("DELETE", &format!("/api/notes/{c2}"), Some("alice"), vec![], false).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(a.files(), 2, "the file stays until the sweeper runs");
+    let young = a.admin.sweep_unattended(chuck::admin::SWEEP_GRACE_SECS).unwrap();
+    assert_eq!((young.removed, young.too_new), (0, 1), "a file written moments ago is not swept yet");
+    assert_eq!(a.admin.sweep_unattended(0).unwrap().removed, 1);
     assert_eq!(a.files(), 1, "only bob's copy remains");
 
     // a media card may lose its text, a plain card may not
