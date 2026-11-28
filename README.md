@@ -33,6 +33,11 @@ Everything is a card with a `kind`: `note`, `todo` (a card with `- [ ]` items, s
 - `auth::Authenticator`: returns the owner id per request. Built in: `local`, `token`, `header` (trusted proxy header), `jwt` (OIDC/ALB/Cognito). Your own provider (a company SSO, a CDN signer, anything) plugs in from your repo without forking: see [docs/AUTH.md](docs/AUTH.md) and `examples/custom_auth.rs`. Every store call is scoped by owner.
 - `api.rs`: thin JSON API (`/api/notes`, `/api/tags`, `/healthz`). Capture clients (CLI, browser extension, hotkey) only need these endpoints.
 
+## Design notes
+
+- [docs/ARCHITECTURE-REVIEW.md](docs/ARCHITECTURE-REVIEW.md): review findings and how the store depends on SQLite.
+- [docs/specs/service-layer.md](docs/specs/service-layer.md): plan to split into data, control and management planes.
+
 ## Hosting later on AWS
 
 See [docs/AWS.md](docs/AWS.md). A `Dockerfile` is included. Configure `CHUCK_AUTH` before exposing it; Chuck refuses to listen on a non-loopback address without authentication.
