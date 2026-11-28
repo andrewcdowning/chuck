@@ -15,7 +15,7 @@ macro_rules! cases {
     };
 }
 
-cases!(crud_tags_and_isolation, reminders, todo_cards_pin_and_due, auto_tag_rules, tag_suggestions_confidence_and_feedback, attachments_are_owned_ordered_and_cascade, manual_order_within_groups, many_moves_into_one_gap_renumber, user_lifecycle, search_contract, update_semantics, paging, card_kinds, attachment_cap, ownership_is_checked_first);
+cases!(crud_tags_and_isolation, reminders, todo_cards_pin_and_due, auto_tag_rules, tag_suggestions_confidence_and_feedback, attachments_are_owned_ordered_and_cascade, manual_order_within_groups, many_moves_into_one_gap_renumber, user_lifecycle, search_contract, update_semantics, paging, card_kinds, attachment_cap, ownership_is_checked_first, rule_cap);
 
 #[test]
 fn every_conformance_case_is_listed() {
@@ -24,7 +24,7 @@ fn every_conformance_case_is_listed() {
         .lines()
         .filter_map(|l| l.strip_prefix("pub fn "))
         .filter_map(|l| l.split('(').next())
-        .filter(|n| *n != "run_all")
+        .filter(|n| !n.starts_with("run_"))
         .collect();
     assert!(defined.len() >= 10, "found only {} cases", defined.len());
     for n in &defined {

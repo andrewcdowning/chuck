@@ -19,6 +19,12 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A short version string for an attachment, derived from its storage keys (which already include the owner, so two
+/// users' files never share a version). It changes when the file or its preview changes.
+pub fn attachment_version(blob_key: &str, thumb_key: Option<&str>) -> String {
+    sha256_hex(format!("{blob_key}|{}", thumb_key.unwrap_or("")).as_bytes())[..16].to_string()
+}
+
 /// The storage key for `bytes` owned by `owner`.
 pub fn key_for(owner: &str, bytes: &[u8]) -> String {
     format!("{}/{}", &sha256_hex(owner.as_bytes())[..32], sha256_hex(bytes))

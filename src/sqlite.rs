@@ -1,6 +1,7 @@
 use crate::domain::card::tags_for;
-use crate::domain::schedule::{self, Schedule, ScheduleInput};
-use crate::domain::{input, order, search};
+use crate::domain::order::Slot;
+use crate::domain::schedule::Schedule;
+use crate::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
 use crate::store::*;
 use crate::tagging::{feedback_offset, strip_hashtags, Doc, Model, SuggestionSet, MIN_DOCS_TO_CALIBRATE};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -14,14 +15,6 @@ pub struct SqliteStore {
     /// Bumped whenever note text changes; cached tagging models are rebuilt when it moves.
     generation: AtomicU64,
     models: Mutex<HashMap<String, (u64, Arc<Model>)>>,
-}
-
-fn schedule_input(i: &NoteInput) -> ScheduleInput<'_> {
-    ScheduleInput { remind_at: i.remind_at, repeat: i.repeat.as_deref(), reminder_done: i.reminder_done, due_at: i.due_at }
-}
-
-fn move_error(e: order::MoveError) -> StoreError {
-    StoreError::Invalid(e.message().into())
 }
 
 fn now() -> i64 {
@@ -156,38 +149,6 @@ impl SqliteStore {
         Ok(Self { conn: Mutex::new(conn), generation: AtomicU64::new(0), models: Mutex::new(HashMap::new()) })
     }
 
-    /// The owner's cards in display order: open todos first, then the rest, each group by position (highest first).
-    fn ordered(conn: &Connection, owner: &str) -> Result<Vec<(i64, f64, bool, Option<i64>)>> {
-        let mut st = conn.prepare(
-            "SELECT n.id, n.position, n.open_todos > 0, n.due_at FROM notes n WHERE n.owner=?1 ORDER BY (n.open_todos > 0) DESC, n.position DESC, n.id DESC",
-        )?;
-        let v = st.query_map([owner], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<std::result::Result<_, _>>()?;
-        Ok(v)
-    }
-
-    /// Spreads the owner's positions back to whole numbers, keeping the order. Needed only after very many moves
-    /// into the same gap have used up floating-point precision.
-    fn renumber(conn: &Connection, owner: &str) -> Result<()> {
-        let all = Self::ordered(conn, owner)?;
-        let n = all.len();
-        for (k, (id, ..)) in all.iter().enumerate() {
-            conn.execute("UPDATE notes SET position=?1 WHERE id=?2 AND owner=?3", params![order::renumbered(n, k), id, owner])?;
-        }
-        Ok(())
-    }
-
-    /// Where a new card goes: the pure rule in `domain::order`, with one renumbering if the gap is used up.
-    fn new_position(conn: &Connection, owner: &str, open_todo: bool, due: Option<i64>) -> Result<f64> {
-        for _ in 0..2 {
-            let slots: Vec<order::Slot> = Self::ordered(conn, owner)?.into_iter().map(|(_, pos, pinned, due)| order::Slot { pos, pinned, due }).collect();
-            match order::place_new(&slots, open_todo, due) {
-                order::Place::At(p) => return Ok(p),
-                order::Place::Renumber => Self::renumber(conn, owner)?,
-            }
-        }
-        Err(StoreError::Other("could not place card".into()))
-    }
-
     /// Notes that carry at least one tag the user wrote, with the hashtags stripped from the text.
     /// Tags added by auto-tag rules are deliberately not labels.
     pub fn training_docs(&self, owner: &str) -> Result<Vec<Doc>> {
@@ -221,150 +182,181 @@ impl SqliteStore {
         Ok(model)
     }
 
-    fn load(conn: &Connection, owner: &str, id: i64) -> Result<Note> {
-        let mut note = conn
-            .query_row(
-                "SELECT id, body, created_at, updated_at, remind_at, repeat, reminder_done, due_at FROM notes WHERE id=?1 AND owner=?2",
-                params![id, owner],
-                |r| {
-                    Ok(Note {
-                        id: r.get(0)?,
-                        kind: "note",
-                        body: r.get(1)?,
-                        tags: vec![],
-                        created_at: r.get(2)?,
-                        updated_at: r.get(3)?,
-                        remind_at: r.get(4)?,
-                        repeat: r.get(5)?,
-                        reminder_done: r.get::<_, i64>(6)? != 0,
-                        due_at: r.get(7)?,
-                        attachments: vec![],
-                    })
-                },
-            )
-            .optional()?
-            .ok_or(StoreError::NotFound)?;
-        let mut st = conn.prepare("SELECT tag FROM note_tags WHERE note_id=?1 ORDER BY tag")?;
-        note.tags = st.query_map([id], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
-        note.attachments = Self::note_attachments(conn, owner, id)?;
-        note.kind = card_kind(&note.body, note.remind_at, !note.attachments.is_empty());
-        Ok(note)
-    }
-
-    const ATTACHMENT_COLS: &'static str = "id, note_id, mime, bytes, width, height, name, blob_key, thumb_key, duration_ms";
-
-    fn attachment_row(r: &rusqlite::Row) -> rusqlite::Result<Attachment> {
-        let thumb_key: Option<String> = r.get(8)?;
-        let blob_key: String = r.get(7)?;
-        // Derived from the storage keys, which already include the owner, so two users' files never share a version.
-        let v = crate::blob::sha256_hex(format!("{blob_key}|{}", thumb_key.as_deref().unwrap_or("")).as_bytes())[..16].to_string();
-        Ok(Attachment {
-            id: r.get(0)?,
-            note_id: r.get(1)?,
-            mime: r.get(2)?,
-            bytes: r.get(3)?,
-            width: r.get(4)?,
-            height: r.get(5)?,
-            duration_ms: r.get(9)?,
-            name: r.get(6)?,
-            has_thumb: thumb_key.is_some(),
-            v,
-            blob_key,
-            thumb_key,
-        })
-    }
-
-    fn note_attachments(conn: &Connection, owner: &str, note_id: i64) -> Result<Vec<Attachment>> {
-        let sql = format!("SELECT {} FROM attachments WHERE note_id=?1 AND owner=?2 ORDER BY position, id", Self::ATTACHMENT_COLS);
-        let mut st = conn.prepare(&sql)?;
-        let rows = st.query_map(params![note_id, owner], Self::attachment_row)?.collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
-    }
-
-    fn load_attachment(conn: &Connection, owner: &str, id: i64) -> Result<Attachment> {
-        let sql = format!("SELECT {} FROM attachments WHERE id=?1 AND owner=?2", Self::ATTACHMENT_COLS);
-        conn.query_row(&sql, params![id, owner], Self::attachment_row).optional()?.ok_or(StoreError::NotFound)
-    }
-
     fn rule_pairs(conn: &Connection, owner: &str) -> Result<Vec<(String, String)>> {
         let mut st = conn.prepare("SELECT pattern, tag FROM tag_rules WHERE owner=?1 ORDER BY id")?;
         let rows = st.query_map([owner], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }
 
-    fn set_tags(conn: &Connection, owner: &str, id: i64, body: &str) -> Result<()> {
-        let rules = Self::rule_pairs(conn, owner)?;
-        conn.execute("DELETE FROM note_tags WHERE note_id=?1", [id])?;
-        for t in tags_for(&rules, body) {
-            conn.execute("INSERT OR IGNORE INTO note_tags(note_id, tag) VALUES(?1, ?2)", params![id, t])?;
+}
+
+const ATTACHMENT_COLS: &str = "id, note_id, mime, bytes, width, height, name, blob_key, thumb_key, duration_ms";
+
+fn attachment_row(r: &rusqlite::Row) -> rusqlite::Result<Attachment> {
+    let thumb_key: Option<String> = r.get(8)?;
+    let blob_key: String = r.get(7)?;
+    Ok(Attachment {
+        id: r.get(0)?,
+        note_id: r.get(1)?,
+        mime: r.get(2)?,
+        bytes: r.get(3)?,
+        width: r.get(4)?,
+        height: r.get(5)?,
+        duration_ms: r.get(9)?,
+        name: r.get(6)?,
+        has_thumb: thumb_key.is_some(),
+        v: crate::blob::attachment_version(&blob_key, thumb_key.as_deref()),
+        blob_key,
+        thumb_key,
+    })
+}
+
+/// The FTS5 expression for search terms: each term quoted and prefix-matched.
+fn fts_match(terms: &[String]) -> String {
+    terms.iter().map(|w| format!("\"{w}\"*")).collect::<Vec<_>>().join(" ")
+}
+
+/// One SQL transaction. Writes that change card text set `dirty`, which invalidates cached tagging models on commit.
+struct SqliteTx<'c> {
+    tx: rusqlite::Transaction<'c>,
+    dirty: bool,
+}
+
+impl SqliteTx<'_> {
+    fn owns(&self, owner: &str, id: i64) -> Result<bool> {
+        let n: i64 = self.tx.query_row("SELECT COUNT(*) FROM notes WHERE id=?1 AND owner=?2", params![id, owner], |r| r.get(0))?;
+        Ok(n > 0)
+    }
+
+    fn replace_tags(&self, id: i64, tags: &[String]) -> Result<()> {
+        self.tx.execute("DELETE FROM note_tags WHERE note_id=?1", [id])?;
+        for t in tags {
+            self.tx.execute("INSERT OR IGNORE INTO note_tags(note_id, tag) VALUES(?1, ?2)", params![id, t])?;
         }
         Ok(())
     }
+
+    /// Cards with their tags and attachments, in the order of `ids`, fetched a page at a time instead of per card.
+    fn load_notes(&self, owner: &str, ids: &[i64]) -> Result<Vec<NoteRecord>> {
+        let mut by_id: HashMap<i64, NoteRecord> = HashMap::new();
+        for chunk in ids.chunks(400) {
+            let ph = vec!["?"; chunk.len()].join(",");
+            let ids_only: Vec<rusqlite::types::Value> = chunk.iter().map(|i| (*i).into()).collect();
+            let mut with_owner: Vec<rusqlite::types::Value> = vec![owner.to_string().into()];
+            with_owner.extend(ids_only.iter().cloned());
+
+            let sql = format!(
+                "SELECT id, body, created_at, updated_at, remind_at, repeat, reminder_done, due_at, open_todos, position FROM notes WHERE owner=? AND id IN ({ph})"
+            );
+            let mut st = self.tx.prepare(&sql)?;
+            let rows = st.query_map(params_from_iter(with_owner.iter()), |r| {
+                Ok(NoteRecord {
+                    id: r.get(0)?,
+                    body: r.get(1)?,
+                    created_at: r.get(2)?,
+                    updated_at: r.get(3)?,
+                    schedule: Schedule { remind_at: r.get(4)?, repeat: r.get(5)?, reminder_done: r.get::<_, i64>(6)? != 0, due_at: r.get(7)? },
+                    open_todos: r.get(8)?,
+                    position: r.get(9)?,
+                    tags: vec![],
+                    attachments: vec![],
+                })
+            })?;
+            for row in rows {
+                let n = row?;
+                by_id.insert(n.id, n);
+            }
+
+            let sql = format!("SELECT note_id, tag FROM note_tags WHERE note_id IN ({ph}) ORDER BY tag");
+            let mut st = self.tx.prepare(&sql)?;
+            let rows = st.query_map(params_from_iter(ids_only.iter()), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (id, tag) = row?;
+                if let Some(n) = by_id.get_mut(&id) {
+                    n.tags.push(tag);
+                }
+            }
+
+            let sql = format!("SELECT {ATTACHMENT_COLS} FROM attachments WHERE owner=? AND note_id IN ({ph}) ORDER BY position, id");
+            let mut st = self.tx.prepare(&sql)?;
+            let rows = st.query_map(params_from_iter(with_owner.iter()), attachment_row)?;
+            for row in rows {
+                let a = row?;
+                if let Some(n) = by_id.get_mut(&a.note_id) {
+                    n.attachments.push(a);
+                }
+            }
+        }
+        Ok(ids.iter().filter_map(|i| by_id.remove(i)).collect())
+    }
 }
 
-/// Turn user input into a safe FTS5 query: each word quoted, prefix-matched.
-fn fts_query(q: &str) -> Option<String> {
-    let parts: Vec<String> = search::terms(q).into_iter().map(|w| format!("\"{}\"*", w)).collect();
-    if parts.is_empty() { None } else { Some(parts.join(" ")) }
-}
-
-impl NoteStore for SqliteStore {
-    fn create(&self, owner: &str, input: &NoteInput) -> Result<Note> {
-        let body = input.body.as_str();
-        let conn = self.conn.lock().unwrap();
-        let t = now();
-        let sch = schedule::for_new(&schedule_input(input));
-        let (remind_at, repeat, due_at) = (sch.remind_at, sch.repeat, sch.due_at);
-        let position = Self::new_position(&conn, owner, open_items(body) > 0, due_at)?;
-        conn.execute(
-            "INSERT INTO notes(owner, body, created_at, updated_at, remind_at, repeat, due_at, open_todos, position) VALUES(?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![owner, body, t, remind_at, repeat, due_at, open_items(body), position],
+impl RecordTx for SqliteTx<'_> {
+    fn insert_note(&mut self, owner: &str, n: &NoteRecord) -> Result<i64> {
+        let s = &n.schedule;
+        self.tx.execute(
+            "INSERT INTO notes(owner, body, created_at, updated_at, remind_at, repeat, reminder_done, due_at, open_todos, position)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![owner, n.body, n.created_at, n.updated_at, s.remind_at, s.repeat, s.reminder_done as i64, s.due_at, n.open_todos, n.position],
         )?;
-        let id = conn.last_insert_rowid();
-        conn.execute("INSERT INTO notes_fts(rowid, body) VALUES(?1, ?2)", params![id, body])?;
-        Self::set_tags(&conn, owner, id, body)?;
-        self.generation.fetch_add(1, Ordering::Relaxed);
-        Self::load(&conn, owner, id)
+        let id = self.tx.last_insert_rowid();
+        self.tx.execute("INSERT INTO notes_fts(rowid, body) VALUES(?1, ?2)", params![id, n.body])?;
+        self.replace_tags(id, &n.tags)?;
+        self.dirty = true;
+        Ok(id)
     }
 
-    fn update(&self, owner: &str, id: i64, input: &NoteInput) -> Result<Note> {
-        let body = input.body.as_str();
-        let conn = self.conn.lock().unwrap();
-        let cur = Self::load(&conn, owner, id)?;
-        let cur_sch = Schedule { remind_at: cur.remind_at, repeat: cur.repeat.clone(), reminder_done: cur.reminder_done, due_at: cur.due_at };
-        let Schedule { remind_at, repeat, reminder_done: done, due_at } = schedule::merged(&cur_sch, &schedule_input(input));
-        conn.execute(
-            "UPDATE notes SET body=?1, updated_at=?2, remind_at=?3, repeat=?4, reminder_done=?5, due_at=?6, open_todos=?7 WHERE id=?8 AND owner=?9",
-            params![body, now(), remind_at, repeat, done as i64, due_at, open_items(body), id, owner],
-        )?;
-        conn.execute("UPDATE notes_fts SET body=?1 WHERE rowid=?2", params![body, id])?;
-        Self::set_tags(&conn, owner, id, body)?;
-        self.generation.fetch_add(1, Ordering::Relaxed);
-        Self::load(&conn, owner, id)
+    fn get_note(&mut self, owner: &str, id: i64) -> Result<Option<NoteRecord>> {
+        Ok(self.load_notes(owner, &[id])?.pop())
     }
 
-    fn delete(&self, owner: &str, id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let n = conn.execute("DELETE FROM notes WHERE id=?1 AND owner=?2", params![id, owner])?;
-        if n == 0 {
+    fn update_note(&mut self, owner: &str, n: &NoteRecord) -> Result<()> {
+        if !self.owns(owner, n.id)? {
             return Err(StoreError::NotFound);
         }
-        conn.execute("DELETE FROM notes_fts WHERE rowid=?1", [id])?;
-        self.generation.fetch_add(1, Ordering::Relaxed);
+        let s = &n.schedule;
+        self.tx.execute(
+            "UPDATE notes SET body=?1, updated_at=?2, remind_at=?3, repeat=?4, reminder_done=?5, due_at=?6, open_todos=?7 WHERE id=?8 AND owner=?9",
+            params![n.body, n.updated_at, s.remind_at, s.repeat, s.reminder_done as i64, s.due_at, n.open_todos, n.id, owner],
+        )?;
+        self.tx.execute("UPDATE notes_fts SET body=?1 WHERE rowid=?2", params![n.body, n.id])?;
+        self.replace_tags(n.id, &n.tags)?;
+        self.dirty = true;
         Ok(())
     }
 
-    fn list(&self, owner: &str, q: &NoteQuery) -> Result<Vec<Note>> {
-        let conn = self.conn.lock().unwrap();
+    fn set_tags(&mut self, owner: &str, id: i64, tags: &[String]) -> Result<()> {
+        if !self.owns(owner, id)? {
+            return Err(StoreError::NotFound);
+        }
+        self.replace_tags(id, tags)
+    }
+
+    fn touch_note(&mut self, owner: &str, id: i64, updated_at: i64) -> Result<()> {
+        self.tx.execute("UPDATE notes SET updated_at=?1 WHERE id=?2 AND owner=?3", params![updated_at, id, owner])?;
+        Ok(())
+    }
+
+    fn delete_note(&mut self, owner: &str, id: i64) -> Result<bool> {
+        let n = self.tx.execute("DELETE FROM notes WHERE id=?1 AND owner=?2", params![id, owner])?;
+        if n == 0 {
+            return Ok(false);
+        }
+        self.tx.execute("DELETE FROM notes_fts WHERE rowid=?1", [id])?; // tags and attachments follow by foreign key
+        self.dirty = true;
+        Ok(true)
+    }
+
+    fn query_notes(&mut self, owner: &str, q: &RecordQuery) -> Result<Vec<NoteRecord>> {
         let mut sql = String::from("SELECT n.id FROM notes n WHERE n.owner=?");
         let mut args: Vec<rusqlite::types::Value> = vec![owner.to_string().into()];
-        if let Some(fq) = q.q.as_deref().and_then(fts_query) {
+        if !q.terms.is_empty() {
             sql.push_str(" AND n.id IN (SELECT rowid FROM notes_fts WHERE notes_fts MATCH ?)");
-            args.push(fq.into());
+            args.push(fts_match(&q.terms).into());
         }
-        if let Some(tag) = q.tag.as_deref().filter(|t| !t.is_empty()) {
+        if let Some(tag) = &q.tag {
             sql.push_str(" AND n.id IN (SELECT note_id FROM note_tags WHERE tag=?)");
-            args.push(tag.trim_start_matches('#').to_lowercase().into());
+            args.push(tag.clone().into());
         }
         if let Some(from) = q.from {
             sql.push_str(" AND n.created_at>=?");
@@ -374,58 +366,143 @@ impl NoteStore for SqliteStore {
             sql.push_str(" AND n.created_at<=?");
             args.push(to.into());
         }
-        if q.reminders.unwrap_or(false) {
+        if q.reminders_only {
             sql.push_str(" AND n.remind_at IS NOT NULL AND n.reminder_done=0 ORDER BY n.remind_at ASC, n.id ASC LIMIT ? OFFSET ?");
         } else {
-            // Todo cards with open items stay on top (soonest due first, undated last) until they are complete.
+            // Todo cards with open items stay on top until they are complete; then by manual position.
             sql.push_str(" ORDER BY (n.open_todos > 0) DESC, n.position DESC, n.id DESC LIMIT ? OFFSET ?");
         }
-        args.push((q.limit.unwrap_or(50).min(200) as i64).into());
-        args.push((q.offset.unwrap_or(0) as i64).into());
-
-        let ids: Vec<i64> = conn
-            .prepare(&sql)?
-            .query_map(params_from_iter(args), |r| r.get(0))?
-            .collect::<std::result::Result<_, _>>()?;
-        ids.into_iter().map(|id| Self::load(&conn, owner, id)).collect()
+        args.push(q.limit.map_or(-1, |l| l as i64).into());
+        args.push((q.offset as i64).into());
+        let ids: Vec<i64> = self.tx.prepare(&sql)?.query_map(params_from_iter(args), |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+        self.load_notes(owner, &ids)
     }
 
-    fn get(&self, owner: &str, id: i64) -> Result<Note> {
-        let conn = self.conn.lock().unwrap();
-        Self::load(&conn, owner, id)
+    fn slot(&mut self, owner: &str, id: i64) -> Result<Option<Slot>> {
+        Ok(self
+            .tx
+            .query_row("SELECT position, open_todos > 0, due_at FROM notes WHERE id=?1 AND owner=?2", params![id, owner], |r| {
+                Ok(Slot { pos: r.get(0)?, pinned: r.get(1)?, due: r.get(2)? })
+            })
+            .optional()?)
     }
 
-    fn move_note(&self, owner: &str, id: i64, prev: Option<i64>, next: Option<i64>) -> Result<Note> {
-        {
-            let conn = self.conn.lock().unwrap();
-            let own: Option<i64> = conn.query_row("SELECT id FROM notes WHERE id=?1 AND owner=?2", params![id, owner], |r| r.get(0)).optional()?;
-            if own.is_none() {
-                return Err(StoreError::NotFound);
-            }
+    fn slots(&mut self, owner: &str) -> Result<Vec<(i64, Slot)>> {
+        let mut st = self.tx.prepare(
+            "SELECT n.id, n.position, n.open_todos > 0, n.due_at FROM notes n WHERE n.owner=?1 ORDER BY (n.open_todos > 0) DESC, n.position DESC, n.id DESC",
+        )?;
+        let v = st.query_map([owner], |r| Ok((r.get(0)?, Slot { pos: r.get(1)?, pinned: r.get(2)?, due: r.get(3)? })))?.collect::<std::result::Result<_, _>>()?;
+        Ok(v)
+    }
+
+    fn set_positions(&mut self, owner: &str, positions: &[(i64, f64)]) -> Result<()> {
+        for (id, pos) in positions {
+            self.tx.execute("UPDATE notes SET position=?1 WHERE id=?2 AND owner=?3", params![pos, id, owner])?;
         }
-        order::check_request(id, prev, next).map_err(move_error)?;
-        let conn = self.conn.lock().unwrap();
-        let info = |nid: i64| -> Result<(f64, bool)> {
-            conn.query_row("SELECT position, open_todos > 0 FROM notes WHERE id=?1 AND owner=?2", params![nid, owner], |r| Ok((r.get(0)?, r.get(1)?)))
-                .optional()?
-                .ok_or(StoreError::NotFound)
-        };
-        let (_, pinned) = info(id)?;
-        let mut above = prev.map(info).transpose()?;
-        let mut below = next.map(info).transpose()?;
-        order::check_neighbours(pinned, above, below).map_err(move_error)?;
-        let pos = match order::between(above.map(|x| x.0), below.map(|x| x.0)) {
-            Some(p) => p,
-            None => {
-                Self::renumber(&conn, owner)?;
-                above = prev.map(info).transpose()?;
-                below = next.map(info).transpose()?;
-                order::between(above.map(|x| x.0), below.map(|x| x.0)).ok_or_else(|| StoreError::Other("could not place card".into()))?
-            }
-        };
-        conn.execute("UPDATE notes SET position=?1 WHERE id=?2 AND owner=?3", params![pos, id, owner])?;
-        Self::load(&conn, owner, id)
+        Ok(())
     }
+
+    fn tag_counts(&mut self, owner: &str) -> Result<Vec<TagCount>> {
+        let mut st = self.tx.prepare(
+            "SELECT t.tag, COUNT(*) c FROM note_tags t JOIN notes n ON n.id=t.note_id
+             WHERE n.owner=?1 GROUP BY t.tag ORDER BY c DESC, t.tag",
+        )?;
+        let rows = st.query_map([owner], |r| Ok(TagCount { tag: r.get(0)?, count: r.get(1)? }))?.collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    fn rules(&mut self, owner: &str) -> Result<Vec<Rule>> {
+        let mut st = self.tx.prepare("SELECT id, pattern, tag FROM tag_rules WHERE owner=?1 ORDER BY id")?;
+        let rows = st.query_map([owner], |r| Ok(Rule { id: r.get(0)?, pattern: r.get(1)?, tag: r.get(2)? }))?.collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    fn insert_rule(&mut self, owner: &str, pattern: &str, tag: &str, created_at: i64) -> Result<Rule> {
+        self.tx.execute("INSERT INTO tag_rules(owner, pattern, tag, created_at) VALUES(?1, ?2, ?3, ?4)", params![owner, pattern, tag, created_at])?;
+        Ok(Rule { id: self.tx.last_insert_rowid(), pattern: pattern.to_string(), tag: tag.to_string() })
+    }
+
+    fn delete_rule(&mut self, owner: &str, id: i64) -> Result<bool> {
+        Ok(self.tx.execute("DELETE FROM tag_rules WHERE id=?1 AND owner=?2", params![id, owner])? > 0)
+    }
+
+    fn count_attachments(&mut self, owner: &str, note_id: i64) -> Result<i64> {
+        Ok(self.tx.query_row("SELECT COUNT(*) FROM attachments WHERE note_id=?1 AND owner=?2", params![note_id, owner], |r| r.get(0))?)
+    }
+
+    fn insert_attachment(&mut self, owner: &str, note_id: i64, a: &NewAttachment, created_at: i64) -> Result<Attachment> {
+        if !self.owns(owner, note_id)? {
+            return Err(StoreError::NotFound);
+        }
+        let next: i64 = self.tx.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM attachments WHERE note_id=?1 AND owner=?2",
+            params![note_id, owner],
+            |r| r.get(0),
+        )?;
+        self.tx.execute(
+            "INSERT INTO attachments(owner, note_id, position, blob_key, sha256, mime, bytes, width, height, name, created_at, duration_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![owner, note_id, next, a.blob_key, a.sha256, a.mime, a.bytes, a.width, a.height, a.name, created_at, a.duration_ms],
+        )?;
+        let id = self.tx.last_insert_rowid();
+        self.get_attachment(owner, id)?.ok_or(StoreError::NotFound)
+    }
+
+    fn get_attachment(&mut self, owner: &str, id: i64) -> Result<Option<Attachment>> {
+        let sql = format!("SELECT {ATTACHMENT_COLS} FROM attachments WHERE id=?1 AND owner=?2");
+        Ok(self.tx.query_row(&sql, params![id, owner], attachment_row).optional()?)
+    }
+
+    fn set_thumb(&mut self, owner: &str, id: i64, thumb_key: &str) -> Result<Option<String>> {
+        let old = self.get_attachment(owner, id)?.ok_or(StoreError::NotFound)?.thumb_key;
+        self.tx.execute("UPDATE attachments SET thumb_key=?1 WHERE id=?2 AND owner=?3", params![thumb_key, id, owner])?;
+        Ok(old)
+    }
+
+    fn delete_attachment(&mut self, owner: &str, id: i64) -> Result<Option<Attachment>> {
+        let Some(a) = self.get_attachment(owner, id)? else { return Ok(None) };
+        self.tx.execute("DELETE FROM attachments WHERE id=?1 AND owner=?2", params![id, owner])?;
+        Ok(Some(a))
+    }
+
+    fn blob_referenced(&mut self, owner: &str, key: &str) -> Result<bool> {
+        let n: i64 = self.tx.query_row(
+            "SELECT COUNT(*) FROM attachments WHERE owner=?1 AND (blob_key=?2 OR thumb_key=?2)",
+            params![owner, key],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+}
+
+impl crate::service::HasRecords for SqliteStore {
+    type R = SqliteStore;
+    fn records(&self) -> &SqliteStore {
+        self
+    }
+}
+
+impl NoteRecords for SqliteStore {
+    fn transact<T>(&self, f: impl FnOnce(&mut dyn RecordTx) -> Result<T>) -> Result<T> {
+        let mut conn = self.conn.lock().unwrap();
+        let mut t = SqliteTx { tx: conn.transaction()?, dirty: false };
+        let out = f(&mut t);
+        let dirty = t.dirty;
+        match out {
+            Ok(v) => {
+                t.tx.commit()?;
+                if dirty {
+                    self.generation.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(v)
+            }
+            Err(e) => Err(e), // dropping the transaction rolls it back
+        }
+    }
+}
+
+impl NoteStore for SqliteStore {
+    crate::note_service_methods!();
 
     fn suggest_tags(&self, owner: &str, text: &str) -> Result<SuggestionSet> {
         let model = self.model(owner)?;
@@ -455,98 +532,6 @@ impl NoteStore for SqliteStore {
             params![owner, tag, if accepted { "accepted" } else { "dismissed" }, confidence.clamp(0.0, 1.0), now()],
         )?;
         Ok(())
-    }
-
-    fn rules(&self, owner: &str) -> Result<Vec<Rule>> {
-        let conn = self.conn.lock().unwrap();
-        let mut st = conn.prepare("SELECT id, pattern, tag FROM tag_rules WHERE owner=?1 ORDER BY id")?;
-        let rows = st
-            .query_map([owner], |r| Ok(Rule { id: r.get(0)?, pattern: r.get(1)?, tag: r.get(2)? }))?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
-    }
-
-    fn add_rule(&self, owner: &str, pattern: &str, tag: &str) -> Result<Rule> {
-        let conn = self.conn.lock().unwrap();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM tag_rules WHERE owner=?1", [owner], |r| r.get(0))?;
-        if n >= 200 {
-            return Err(StoreError::Other("too many rules".into()));
-        }
-        conn.execute(
-            "INSERT INTO tag_rules(owner, pattern, tag, created_at) VALUES(?1, ?2, ?3, ?4)",
-            params![owner, pattern, tag, now()],
-        )?;
-        Ok(Rule { id: conn.last_insert_rowid(), pattern: pattern.to_string(), tag: tag.to_string() })
-    }
-
-    fn delete_rule(&self, owner: &str, id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let n = conn.execute("DELETE FROM tag_rules WHERE id=?1 AND owner=?2", params![id, owner])?;
-        if n == 0 { Err(StoreError::NotFound) } else { Ok(()) }
-    }
-
-    fn apply_rules(&self, owner: &str) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
-        let rules = Self::rule_pairs(&conn, owner)?;
-        let mut st = conn.prepare("SELECT id, body FROM notes WHERE owner=?1")?;
-        let notes: Vec<(i64, String)> = st
-            .query_map([owner], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<_, _>>()?;
-        let mut changed = 0;
-        for (id, body) in notes {
-            let mut before: Vec<String> = Self::load(&conn, owner, id)?.tags;
-            let mut after = tags_for(&rules, &body);
-            before.sort();
-            after.sort();
-            if before != after {
-                Self::set_tags(&conn, owner, id, &body)?;
-                changed += 1;
-            }
-        }
-        Ok(changed)
-    }
-
-    fn add_attachment(&self, owner: &str, note_id: i64, a: &NewAttachment) -> Result<Attachment> {
-        let conn = self.conn.lock().unwrap();
-        let mine: i64 = conn.query_row("SELECT COUNT(*) FROM notes WHERE id=?1 AND owner=?2", params![note_id, owner], |r| r.get(0))?;
-        if mine == 0 {
-            return Err(StoreError::NotFound);
-        }
-        let (count, next): (i64, i64) = conn.query_row(
-            "SELECT COUNT(*), COALESCE(MAX(position), -1) + 1 FROM attachments WHERE note_id=?1 AND owner=?2",
-            params![note_id, owner],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if !input::has_room_for_attachment(count) {
-            return Err(StoreError::Invalid("too many attachments on this card".into()));
-        }
-        conn.execute(
-            "INSERT INTO attachments(owner, note_id, position, blob_key, sha256, mime, bytes, width, height, name, created_at, duration_ms)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![owner, note_id, next, a.blob_key, a.sha256, a.mime, a.bytes, a.width, a.height, a.name, now(), a.duration_ms],
-        )?;
-        let id = conn.last_insert_rowid();
-        conn.execute("UPDATE notes SET updated_at=?1 WHERE id=?2 AND owner=?3", params![now(), note_id, owner])?;
-        Self::load_attachment(&conn, owner, id)
-    }
-
-    fn attachment(&self, owner: &str, id: i64) -> Result<Attachment> {
-        let conn = self.conn.lock().unwrap();
-        Self::load_attachment(&conn, owner, id)
-    }
-
-    fn set_attachment_thumb(&self, owner: &str, id: i64, thumb_key: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
-        let old = Self::load_attachment(&conn, owner, id)?.thumb_key;
-        conn.execute("UPDATE attachments SET thumb_key=?1 WHERE id=?2 AND owner=?3", params![thumb_key, id, owner])?;
-        Ok(old.filter(|k| k != thumb_key))
-    }
-
-    fn delete_attachment(&self, owner: &str, id: i64) -> Result<Attachment> {
-        let conn = self.conn.lock().unwrap();
-        let a = Self::load_attachment(&conn, owner, id)?;
-        conn.execute("DELETE FROM attachments WHERE id=?1 AND owner=?2", params![id, owner])?;
-        Ok(a)
     }
 
     fn touch_user(&self, id: &str, display_name: Option<&str>, admin: bool) -> Result<User> {
@@ -645,27 +630,6 @@ impl NoteStore for SqliteStore {
         Ok(rows)
     }
 
-    fn blob_referenced(&self, owner: &str, key: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM attachments WHERE owner=?1 AND (blob_key=?2 OR thumb_key=?2)",
-            params![owner, key],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
-    }
-
-    fn tags(&self, owner: &str) -> Result<Vec<TagCount>> {
-        let conn = self.conn.lock().unwrap();
-        let mut st = conn.prepare(
-            "SELECT t.tag, COUNT(*) c FROM note_tags t JOIN notes n ON n.id=t.note_id
-             WHERE n.owner=?1 GROUP BY t.tag ORDER BY c DESC, t.tag",
-        )?;
-        let rows = st
-            .query_map([owner], |r| Ok(TagCount { tag: r.get(0)?, count: r.get(1)? }))?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
-    }
 }
 
 #[cfg(test)]
