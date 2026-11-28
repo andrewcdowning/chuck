@@ -190,12 +190,12 @@ impl AccountService {
     }
 
     fn cached(&self, id: &str) -> Option<Principal> {
-        let c = self.cache.lock().unwrap();
+        let c = chuck_core::sync::lock(&self.cache);
         c.get(id).filter(|e| e.at.elapsed() < self.ttl).map(|e| e.principal.clone())
     }
 
     fn remember(&self, p: &Principal) {
-        let mut c = self.cache.lock().unwrap();
+        let mut c = chuck_core::sync::lock(&self.cache);
         if c.len() >= MAX_CACHED {
             c.clear();
         }
@@ -203,7 +203,7 @@ impl AccountService {
     }
 
     fn forget(&self, id: &str) {
-        self.cache.lock().unwrap().remove(id);
+        chuck_core::sync::lock(&self.cache).remove(id);
     }
 
     /// The account for a signed-in identity. Creates it on first sight, keeps its role in step with the configured

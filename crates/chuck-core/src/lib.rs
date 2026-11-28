@@ -5,5 +5,6 @@ pub mod domain;
 pub mod export;
 pub mod media;
 pub mod model;
+pub mod sync;
 pub mod tagging;
 pub mod zip;

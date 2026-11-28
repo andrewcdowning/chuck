@@ -255,7 +255,7 @@ impl RecordTx for MemTx<'_> {
 
 impl NoteRecords for MemRecords {
     fn transact<T>(&self, f: impl FnOnce(&mut dyn RecordTx) -> Result<T>) -> Result<T> {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = chuck_core::sync::lock(&self.state);
         let mut work = guard.clone();
         let mut tx = MemTx { s: &mut work, changed: HashSet::new() };
         let out = f(&mut tx);
@@ -272,20 +272,20 @@ impl NoteRecords for MemRecords {
 
 impl TagSource for MemRecords {
     fn training_version(&self, owner: &str) -> Result<u64> {
-        Ok(self.state.lock().unwrap().versions.get(owner).copied().unwrap_or(0))
+        Ok(chuck_core::sync::lock(&self.state).versions.get(owner).copied().unwrap_or(0))
     }
 
     fn bodies(&self, owner: &str) -> Result<Vec<String>> {
-        Ok(self.state.lock().unwrap().notes.values().filter(|(o, _)| o == owner).map(|(_, r)| r.body.clone()).collect())
+        Ok(chuck_core::sync::lock(&self.state).notes.values().filter(|(o, _)| o == owner).map(|(_, r)| r.body.clone()).collect())
     }
 
     fn rule_pairs(&self, owner: &str) -> Result<Vec<(String, String)>> {
-        Ok(self.state.lock().unwrap().rules.values().filter(|(o, _)| o == owner).map(|(_, r)| (r.pattern.clone(), r.tag.clone())).collect())
+        Ok(chuck_core::sync::lock(&self.state).rules.values().filter(|(o, _)| o == owner).map(|(_, r)| (r.pattern.clone(), r.tag.clone())).collect())
     }
 
     fn feedback_counts(&self, owner: &str) -> Result<Vec<FeedbackCount>> {
         let mut by_tag: BTreeMap<String, (u32, u32)> = BTreeMap::new();
-        for (o, e) in &self.state.lock().unwrap().feedback {
+        for (o, e) in &chuck_core::sync::lock(&self.state).feedback {
             if o == owner {
                 let c = by_tag.entry(e.tag.clone()).or_default();
                 if e.action == "accepted" {
@@ -300,17 +300,17 @@ impl TagSource for MemRecords {
 
     fn record_feedback(&self, owner: &str, tag: &str, accepted: bool, confidence: f64, at: i64) -> Result<()> {
         let action = if accepted { "accepted" } else { "dismissed" }.to_string();
-        self.state.lock().unwrap().feedback.push((owner.to_string(), FeedbackEvent { tag: tag.to_string(), action, confidence, created_at: at }));
+        chuck_core::sync::lock(&self.state).feedback.push((owner.to_string(), FeedbackEvent { tag: tag.to_string(), action, confidence, created_at: at }));
         Ok(())
     }
 
     fn feedback_events(&self, owner: &str) -> Result<Vec<FeedbackEvent>> {
-        Ok(self.state.lock().unwrap().feedback.iter().filter(|(o, _)| o == owner).map(|(_, e)| e.clone()).collect())
+        Ok(chuck_core::sync::lock(&self.state).feedback.iter().filter(|(o, _)| o == owner).map(|(_, e)| e.clone()).collect())
     }
 
     fn owners(&self) -> Result<Vec<(String, i64)>> {
         let mut counts: BTreeMap<String, i64> = BTreeMap::new();
-        for (o, _) in self.state.lock().unwrap().notes.values() {
+        for (o, _) in chuck_core::sync::lock(&self.state).notes.values() {
             *counts.entry(o.clone()).or_default() += 1;
         }
         Ok(counts.into_iter().collect())
@@ -332,11 +332,11 @@ impl MemStore {
 
 impl AccountRecords for MemRecords {
     fn account(&self, id: &str) -> Result<Option<User>> {
-        Ok(self.state.lock().unwrap().users.get(id).cloned())
+        Ok(chuck_core::sync::lock(&self.state).users.get(id).cloned())
     }
 
     fn insert_account_if_absent(&self, u: &User) -> Result<bool> {
-        let mut st = self.state.lock().unwrap();
+        let mut st = chuck_core::sync::lock(&self.state);
         if st.users.contains_key(&u.id) {
             return Ok(false);
         }
@@ -345,7 +345,7 @@ impl AccountRecords for MemRecords {
     }
 
     fn update_account_profile(&self, id: &str, display_name: Option<&str>, role: &str, last_seen_at: Option<i64>) -> Result<()> {
-        if let Some(u) = self.state.lock().unwrap().users.get_mut(id) {
+        if let Some(u) = chuck_core::sync::lock(&self.state).users.get_mut(id) {
             u.display_name = display_name.map(String::from);
             u.role = role.to_string();
             u.last_seen_at = last_seen_at;
@@ -354,7 +354,7 @@ impl AccountRecords for MemRecords {
     }
 
     fn set_account_status(&self, id: &str, status: &str) -> Result<bool> {
-        match self.state.lock().unwrap().users.get_mut(id) {
+        match chuck_core::sync::lock(&self.state).users.get_mut(id) {
             Some(u) => {
                 u.status = status.to_string();
                 Ok(true)
@@ -364,19 +364,19 @@ impl AccountRecords for MemRecords {
     }
 
     fn list_accounts(&self) -> Result<Vec<User>> {
-        let mut v: Vec<User> = self.state.lock().unwrap().users.values().cloned().collect();
+        let mut v: Vec<User> = chuck_core::sync::lock(&self.state).users.values().cloned().collect();
         v.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
         Ok(v)
     }
 
     fn remove_account(&self, id: &str) -> Result<bool> {
-        Ok(self.state.lock().unwrap().users.remove(id).is_some())
+        Ok(chuck_core::sync::lock(&self.state).users.remove(id).is_some())
     }
 }
 
 impl OwnerRecords for MemRecords {
     fn usage(&self, owner: &str) -> Result<Usage> {
-        let st = self.state.lock().unwrap();
+        let st = chuck_core::sync::lock(&self.state);
         let notes = st.notes.values().filter(|(o, _)| o == owner).count() as i64;
         let (attachments, storage_bytes) =
             st.attachments.values().filter(|(o, _, _)| o == owner).fold((0, 0), |(n, b), (_, _, a)| (n + 1, b + a.bytes));
@@ -384,7 +384,7 @@ impl OwnerRecords for MemRecords {
     }
 
     fn blob_keys(&self, owner: &str) -> Result<Vec<String>> {
-        let st = self.state.lock().unwrap();
+        let st = chuck_core::sync::lock(&self.state);
         let mut keys: Vec<String> =
             st.attachments.values().filter(|(o, _, _)| o == owner).flat_map(|(_, _, a)| std::iter::once(a.file.key().to_string()).chain(a.preview.as_ref().map(|p| p.key().to_string()))).collect();
         keys.sort();
@@ -393,7 +393,7 @@ impl OwnerRecords for MemRecords {
     }
 
     fn all_blob_keys(&self) -> Result<Vec<String>> {
-        let st = self.state.lock().unwrap();
+        let st = chuck_core::sync::lock(&self.state);
         let mut keys: Vec<String> = st.attachments.values().flat_map(|(_, _, a)| std::iter::once(a.file.key().to_string()).chain(a.preview.as_ref().map(|p| p.key().to_string()))).collect();
         keys.sort();
         keys.dedup();
@@ -401,7 +401,7 @@ impl OwnerRecords for MemRecords {
     }
 
     fn purge_rows(&self, owner: &str) -> Result<()> {
-        let mut st = self.state.lock().unwrap();
+        let mut st = chuck_core::sync::lock(&self.state);
         st.notes.retain(|_, (o, _)| o != owner);
         st.attachments.retain(|_, (o, _, _)| o != owner);
         st.rules.retain(|_, (o, _)| o != owner);

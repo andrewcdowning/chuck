@@ -620,7 +620,7 @@ impl chuck_data::service::HasRecords for SqliteStore {
 
 impl NoteRecords for SqliteStore {
     fn transact<T>(&self, f: impl FnOnce(&mut dyn RecordTx) -> Result<T>) -> Result<T> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = chuck_core::sync::lock(&self.conn);
         let mut t = SqliteTx { tx: conn.transaction()?, changed: HashSet::new() };
         let out = f(&mut t);
         let changed = std::mem::take(&mut t.changed);
@@ -637,7 +637,7 @@ impl NoteRecords for SqliteStore {
 
 impl SqliteStore {
     fn bump_versions(&self, owners: impl IntoIterator<Item = String>) {
-        let mut v = self.versions.lock().unwrap();
+        let mut v = chuck_core::sync::lock(&self.versions);
         for o in owners {
             *v.entry(o).or_insert(0) += 1;
         }
@@ -646,23 +646,23 @@ impl SqliteStore {
 
 impl TagSource for SqliteStore {
     fn training_version(&self, owner: &str) -> Result<u64> {
-        Ok(self.versions.lock().unwrap().get(owner).copied().unwrap_or(0))
+        Ok(chuck_core::sync::lock(&self.versions).get(owner).copied().unwrap_or(0))
     }
 
     fn bodies(&self, owner: &str) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         let mut st = conn.prepare("SELECT body FROM notes WHERE owner=?1")?;
         let rows = st.query_map([owner], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }
 
     fn rule_pairs(&self, owner: &str) -> Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         Self::rule_pairs(&conn, owner)
     }
 
     fn feedback_counts(&self, owner: &str) -> Result<Vec<FeedbackCount>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         let mut st = conn.prepare("SELECT tag, SUM(action='accepted'), SUM(action='dismissed') FROM suggestion_events WHERE owner=?1 GROUP BY tag")?;
         let rows = st
             .query_map([owner], |r| {
@@ -673,7 +673,7 @@ impl TagSource for SqliteStore {
     }
 
     fn record_feedback(&self, owner: &str, tag: &str, accepted: bool, confidence: f64, at: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         conn.execute(
             "INSERT INTO suggestion_events(owner, tag, action, confidence, created_at) VALUES(?1, ?2, ?3, ?4, ?5)",
             params![owner, tag, if accepted { "accepted" } else { "dismissed" }, confidence, at],
@@ -682,7 +682,7 @@ impl TagSource for SqliteStore {
     }
 
     fn feedback_events(&self, owner: &str) -> Result<Vec<FeedbackEvent>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         let mut st = conn.prepare("SELECT tag, action, confidence, created_at FROM suggestion_events WHERE owner=?1 ORDER BY id")?;
         let rows = st
             .query_map([owner], |r| Ok(FeedbackEvent { tag: r.get(0)?, action: r.get(1)?, confidence: r.get(2)?, created_at: r.get(3)? }))?
@@ -692,7 +692,7 @@ impl TagSource for SqliteStore {
 
     /// Owners with notes in this database, and how many each.
     fn owners(&self) -> Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         let mut st = conn.prepare("SELECT owner, COUNT(*) FROM notes GROUP BY owner ORDER BY owner")?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
         Ok(rows)
@@ -705,12 +705,12 @@ fn user_row(r: &rusqlite::Row) -> rusqlite::Result<User> {
 
 impl AccountRecords for SqliteStore {
     fn account(&self, id: &str) -> Result<Option<User>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         Ok(conn.query_row("SELECT id, display_name, role, status, created_at, last_seen_at FROM users WHERE id=?1", [id], user_row).optional()?)
     }
 
     fn insert_account_if_absent(&self, u: &User) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         let n = conn.execute(
             "INSERT OR IGNORE INTO users(id, display_name, role, status, created_at, last_seen_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
             params![u.id, u.display_name, u.role, u.status, u.created_at, u.last_seen_at],
@@ -719,32 +719,32 @@ impl AccountRecords for SqliteStore {
     }
 
     fn update_account_profile(&self, id: &str, display_name: Option<&str>, role: &str, last_seen_at: Option<i64>) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         conn.execute("UPDATE users SET display_name=?1, role=?2, last_seen_at=?3 WHERE id=?4", params![display_name, role, last_seen_at, id])?;
         Ok(())
     }
 
     fn set_account_status(&self, id: &str, status: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         Ok(conn.execute("UPDATE users SET status=?1 WHERE id=?2", params![status, id])? > 0)
     }
 
     fn list_accounts(&self) -> Result<Vec<User>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         let mut st = conn.prepare("SELECT id, display_name, role, status, created_at, last_seen_at FROM users ORDER BY created_at, id")?;
         let rows = st.query_map([], user_row)?.collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }
 
     fn remove_account(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         Ok(conn.execute("DELETE FROM users WHERE id=?1", [id])? > 0)
     }
 }
 
 impl OwnerRecords for SqliteStore {
     fn usage(&self, owner: &str) -> Result<Usage> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         let notes: i64 = conn.query_row("SELECT COUNT(*) FROM notes WHERE owner=?1", [owner], |r| r.get(0))?;
         let (attachments, storage_bytes): (i64, i64) =
             conn.query_row("SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM attachments WHERE owner=?1", [owner], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -752,7 +752,7 @@ impl OwnerRecords for SqliteStore {
     }
 
     fn blob_keys(&self, owner: &str) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         let mut st = conn.prepare("SELECT blob_key, thumb_key FROM attachments WHERE owner=?1")?;
         let rows: Vec<(String, Option<String>)> = st.query_map([owner], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
         let mut keys: Vec<String> = rows.into_iter().flat_map(|(a, b)| std::iter::once(a).chain(b)).collect();
@@ -762,7 +762,7 @@ impl OwnerRecords for SqliteStore {
     }
 
     fn all_blob_keys(&self) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = chuck_core::sync::lock(&self.conn);
         let mut st = conn.prepare("SELECT blob_key FROM attachments UNION SELECT thumb_key FROM attachments WHERE thumb_key IS NOT NULL")?;
         let rows = st.query_map([], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
         Ok(rows)
@@ -770,7 +770,7 @@ impl OwnerRecords for SqliteStore {
 
     fn purge_rows(&self, owner: &str) -> Result<()> {
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = chuck_core::sync::lock(&self.conn);
             let tx = conn.unchecked_transaction()?;
             tx.execute("DELETE FROM notes_fts WHERE rowid IN (SELECT rowid FROM notes WHERE owner=?1)", [owner])?;
             tx.execute("DELETE FROM notes WHERE owner=?1", [owner])?; // tags and attachments follow by foreign key

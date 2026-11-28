@@ -47,14 +47,14 @@ fn random80(st: &mut State) -> u128 {
 /// A new id stamped with the given time (milliseconds). Used when old data is given ids, so that they sort the way the
 /// data was created.
 pub fn new_id_at(ms: u64) -> String {
-    let mut st = STATE.lock().unwrap();
+    let mut st = chuck_core::sync::lock(&STATE);
     let random = random80(&mut st);
     id::encode(ms, random)
 }
 
 /// A new id for now.
 pub fn new_id() -> String {
-    let mut st = STATE.lock().unwrap();
+    let mut st = chuck_core::sync::lock(&STATE);
     let ms = now_ms().max(st.last_ms);
     let random = if ms == st.last_ms {
         // same millisecond as the last one: count up, so ids still sort in the order they were made

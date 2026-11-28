@@ -80,7 +80,7 @@ impl ModelCache {
     /// The cached model if it is for this version, else the result of `train`, which is then cached.
     fn get_or_train(&self, owner: &str, version: u64, train: impl FnOnce() -> Result<Model>) -> Result<Arc<Model>> {
         let tick = self.tick.fetch_add(1, Ordering::Relaxed);
-        if let Some(e) = self.entries.lock().unwrap().get_mut(owner) {
+        if let Some(e) = chuck_core::sync::lock(&self.entries).get_mut(owner) {
             if e.version == version {
                 e.last_used = tick;
                 return Ok(e.model.clone());
@@ -88,7 +88,7 @@ impl ModelCache {
         }
         let model = Arc::new(train()?);
         self.trained.fetch_add(1, Ordering::Relaxed);
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = chuck_core::sync::lock(&self.entries);
         if !entries.contains_key(owner) && entries.len() >= self.capacity {
             if let Some(oldest) = entries.iter().min_by_key(|(_, e)| e.last_used).map(|(k, _)| k.clone()) {
                 entries.remove(&oldest);
@@ -100,7 +100,7 @@ impl ModelCache {
 
     /// Drops the owner's model (their account was deleted).
     pub fn forget(&self, owner: &str) {
-        self.entries.lock().unwrap().remove(owner);
+        chuck_core::sync::lock(&self.entries).remove(owner);
     }
 
     /// How many models have been trained since the cache was made. For tests and diagnostics.
@@ -109,7 +109,7 @@ impl ModelCache {
     }
 
     pub fn len(&self) -> usize {
-        self.entries.lock().unwrap().len()
+        chuck_core::sync::lock(&self.entries).len()
     }
 
     pub fn is_empty(&self) -> bool {
