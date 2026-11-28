@@ -14,7 +14,7 @@ use crate::store::*;
 /// Makes a new, empty store for one case.
 pub type Make = dyn Fn() -> Box<dyn NoteStore>;
 
-/// The cards, tags, rules and attachments cases: what `NoteService` provides over any `NoteRecords` backend.
+/// The cards, tags, rules, attachments and tag suggestion cases: what the services provide over any backend.
 pub fn run_notes(make: &Make) {
     crud_tags_and_isolation(make);
     reminders(make);
@@ -30,11 +30,11 @@ pub fn run_notes(make: &Make) {
     attachment_cap(make);
     ownership_is_checked_first(make);
     rule_cap(make);
+    tag_suggestions_confidence_and_feedback(make);
 }
 
-/// The cases for parts that are not yet behind the record traits: tag suggestions and accounts.
+/// The cases for parts that are not yet behind the record traits: accounts.
 pub fn run_extras(make: &Make) {
-    tag_suggestions_confidence_and_feedback(make);
     user_lifecycle(make);
 }
 

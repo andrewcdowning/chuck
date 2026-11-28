@@ -15,6 +15,7 @@ pub mod service;
 pub mod sqlite;
 pub mod store;
 pub mod tagging;
+pub mod tagmodel;
 pub mod zip;
 
 use std::sync::Arc;

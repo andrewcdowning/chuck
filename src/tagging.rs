@@ -397,7 +397,7 @@ impl Model {
             return Vec::new();
         }
         let (words, base) = features(&strip_hashtags(text));
-        let written = crate::store::extract_tags(text);
+        let written = crate::domain::card::extract_tags(text);
         let mut feats = base;
         feats.extend(written.iter().map(|t| format!("t:{t}")));
         let mut out: Vec<(f64, Suggestion)> = Vec::new();

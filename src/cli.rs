@@ -1,5 +1,6 @@
 //! Command-line helpers that run against a local database instead of starting the server.
 
+use crate::tagmodel::{training_docs, TagSource};
 use crate::{sqlite::SqliteStore, tagging};
 
 const USAGE: &str = "usage: chuck eval-tags [--db PATH] [--owner ID]
@@ -63,7 +64,7 @@ pub fn eval_tags(args: &[String]) -> i32 {
             return 2;
         }
     };
-    match store.training_docs(&owner) {
+    match training_docs(&store, &owner) {
         Ok(docs) => {
             println!("owner: {owner}\n");
             print!("{}", tagging::evaluate(&docs));

@@ -30,11 +30,12 @@ cases!(
     card_kinds,
     attachment_cap,
     ownership_is_checked_first,
-    rule_cap
+    rule_cap,
+    tag_suggestions_confidence_and_feedback
 );
 
-/// Cases not run here need suggestions or accounts, which are not behind the record traits yet.
-const NEEDS_EXTRAS: &[&str] = &["tag_suggestions_confidence_and_feedback", "user_lifecycle"];
+/// Cases not run here need accounts, which are not behind the record traits yet.
+const NEEDS_EXTRAS: &[&str] = &["user_lifecycle"];
 
 #[test]
 fn every_case_runs_here_or_is_known_to_need_extras() {
