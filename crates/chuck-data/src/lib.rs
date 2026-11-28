@@ -3,6 +3,7 @@
 //! in `service::NoteService`, `tagmodel::TagModelService` and `chuck_core::domain`.
 
 pub mod blob;
+pub mod ids;
 pub mod owner;
 pub mod records;
 pub mod service;

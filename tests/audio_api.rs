@@ -65,7 +65,7 @@ async fn audio_upload_ranges_and_isolation() {
     let a = app("ranges");
     let (_, _, b) = a.req("POST", "/api/notes?media=true", Some("alice"), &[("content-type", "application/json")], br#"{"body":""}"#.to_vec()).await;
     let note: serde_json::Value = serde_json::from_slice(&b).unwrap();
-    let nid = note["id"].as_i64().unwrap();
+    let nid = note["id"].as_str().unwrap().to_string();
 
     // bad durations are refused
     for d in ["-1", "999999999"] {
@@ -76,7 +76,7 @@ async fn audio_upload_ranges_and_isolation() {
     assert_eq!(s, StatusCode::CREATED);
     let att: serde_json::Value = serde_json::from_slice(&b).unwrap();
     assert_eq!((att["mime"].as_str(), att["duration_ms"].as_i64(), att["width"].as_i64()), (Some("audio/wav"), Some(500), None));
-    let (id, v) = (att["id"].as_i64().unwrap(), att["v"].as_str().unwrap().to_string());
+    let (id, v) = (att["id"].as_str().unwrap().to_string(), att["v"].as_str().unwrap().to_string());
     let url = format!("/api/media/{id}?v={v}");
 
     // whole file: tag stripped, ranges advertised

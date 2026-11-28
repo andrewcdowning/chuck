@@ -25,6 +25,7 @@ pub type MigrationStep = fn(&Connection) -> Result<()>;
 pub const MIGRATIONS: &[(&str, MigrationStep)] = &[
     ("baseline: the schema as it stood when versions were introduced", migrate_baseline),
     ("card positions become sortable text, so moving a card never renumbers the others", migrate_text_positions),
+    ("cards, files and rules get text ids that do not depend on the database", migrate_text_ids),
 ];
 
 /// Brings the database up to date. Refuses a database from a newer program instead of guessing.
@@ -71,6 +72,103 @@ fn migrate_text_positions(conn: &Connection) -> Result<()> {
          ALTER TABLE notes DROP COLUMN position;
          ALTER TABLE notes RENAME COLUMN pos TO position;
          CREATE INDEX notes_owner_position ON notes(owner, position);",
+    )?;
+    Ok(())
+}
+
+/// Step 3. Ids were the database's row numbers, which a database reuses after deleting the highest one and which no other
+/// store can honour. They become 26-character text ids (see `chuck_core::domain::id`). Existing rows get new ids stamped
+/// with their creation time, strictly increasing, so ids sort in the order things were created. Every reference (tags, files)
+/// is carried over, and the search index is rebuilt over the new tables' row numbers.
+fn migrate_text_ids(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TEMP TABLE map_notes(old INTEGER PRIMARY KEY, new TEXT NOT NULL);
+         CREATE TEMP TABLE map_attachments(old INTEGER PRIMARY KEY, new TEXT NOT NULL);
+         CREATE TEMP TABLE map_rules(old INTEGER PRIMARY KEY, new TEXT NOT NULL);",
+    )?;
+    for (table, map) in [("notes", "map_notes"), ("attachments", "map_attachments"), ("tag_rules", "map_rules")] {
+        let rows: Vec<(i64, i64)> = {
+            let mut st = conn.prepare(&format!("SELECT id, created_at FROM {table} ORDER BY created_at, id"))?;
+            let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+            v
+        };
+        let mut last_ms = 0u64;
+        for (old, created_at) in rows {
+            // the creation time, nudged forward when several rows share a second, so every id is larger than the one before
+            last_ms = ((created_at.max(0) as u64) * 1000).max(last_ms + 1);
+            conn.execute(&format!("INSERT INTO {map}(old, new) VALUES(?1, ?2)"), params![old, chuck_data::ids::new_id_at(last_ms)])?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE TABLE notes_v3(
+           id TEXT PRIMARY KEY,
+           owner TEXT NOT NULL,
+           body TEXT NOT NULL,
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL,
+           remind_at INTEGER,
+           repeat TEXT,
+           reminder_done INTEGER NOT NULL DEFAULT 0,
+           due_at INTEGER,
+           open_todos INTEGER NOT NULL DEFAULT 0,
+           position TEXT NOT NULL DEFAULT '');
+         INSERT INTO notes_v3(id, owner, body, created_at, updated_at, remind_at, repeat, reminder_done, due_at, open_todos, position)
+           SELECT m.new, n.owner, n.body, n.created_at, n.updated_at, n.remind_at, n.repeat, n.reminder_done, n.due_at, n.open_todos, n.position
+           FROM notes n JOIN map_notes m ON m.old = n.id ORDER BY n.id;
+         CREATE TABLE note_tags_v3(
+           note_id TEXT NOT NULL REFERENCES notes_v3(id) ON DELETE CASCADE,
+           tag TEXT NOT NULL,
+           PRIMARY KEY(note_id, tag));
+         INSERT INTO note_tags_v3(note_id, tag) SELECT m.new, t.tag FROM note_tags t JOIN map_notes m ON m.old = t.note_id;
+         CREATE TABLE attachments_v3(
+           id TEXT PRIMARY KEY,
+           owner TEXT NOT NULL,
+           note_id TEXT NOT NULL REFERENCES notes_v3(id) ON DELETE CASCADE,
+           position INTEGER NOT NULL,
+           blob_key TEXT NOT NULL,
+           thumb_key TEXT,
+           sha256 TEXT NOT NULL,
+           mime TEXT NOT NULL,
+           bytes INTEGER NOT NULL,
+           width INTEGER,
+           height INTEGER,
+           name TEXT,
+           created_at INTEGER NOT NULL,
+           duration_ms INTEGER);
+         INSERT INTO attachments_v3(id, owner, note_id, position, blob_key, thumb_key, sha256, mime, bytes, width, height, name, created_at, duration_ms)
+           SELECT ma.new, a.owner, mn.new, a.position, a.blob_key, a.thumb_key, a.sha256, a.mime, a.bytes, a.width, a.height, a.name, a.created_at, a.duration_ms
+           FROM attachments a JOIN map_attachments ma ON ma.old = a.id JOIN map_notes mn ON mn.old = a.note_id;
+         CREATE TABLE tag_rules_v3(
+           id TEXT PRIMARY KEY,
+           owner TEXT NOT NULL,
+           pattern TEXT NOT NULL,
+           tag TEXT NOT NULL,
+           created_at INTEGER NOT NULL);
+         INSERT INTO tag_rules_v3(id, owner, pattern, tag, created_at)
+           SELECT mr.new, r.owner, r.pattern, r.tag, r.created_at FROM tag_rules r JOIN map_rules mr ON mr.old = r.id;
+
+         DROP TABLE notes_fts;
+         DROP TABLE note_tags;
+         DROP TABLE attachments;
+         DROP TABLE tag_rules;
+         DROP TABLE notes;
+         ALTER TABLE notes_v3 RENAME TO notes;
+         ALTER TABLE note_tags_v3 RENAME TO note_tags;
+         ALTER TABLE attachments_v3 RENAME TO attachments;
+         ALTER TABLE tag_rules_v3 RENAME TO tag_rules;
+
+         CREATE VIRTUAL TABLE notes_fts USING fts5(body);
+         INSERT INTO notes_fts(rowid, body) SELECT rowid, body FROM notes;
+         CREATE INDEX notes_owner_created ON notes(owner, created_at DESC);
+         CREATE INDEX notes_owner_position ON notes(owner, position);
+         CREATE INDEX notes_remind ON notes(owner, remind_at);
+         CREATE INDEX note_tags_tag ON note_tags(tag);
+         CREATE INDEX attachments_note ON attachments(note_id, position);
+         CREATE INDEX attachments_owner_blob ON attachments(owner, blob_key);
+         CREATE INDEX tag_rules_owner ON tag_rules(owner);
+         DROP TABLE map_notes;
+         DROP TABLE map_attachments;
+         DROP TABLE map_rules;",
     )?;
     Ok(())
 }
@@ -230,7 +328,7 @@ impl SqliteStore {
     }
 
     fn rule_pairs(conn: &Connection, owner: &str) -> Result<Vec<(String, String)>> {
-        let mut st = conn.prepare("SELECT pattern, tag FROM tag_rules WHERE owner=?1 ORDER BY id")?;
+        let mut st = conn.prepare("SELECT pattern, tag FROM tag_rules WHERE owner=?1 ORDER BY created_at, id")?;
         let rows = st.query_map([owner], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }
@@ -271,12 +369,12 @@ struct SqliteTx<'c> {
 }
 
 impl SqliteTx<'_> {
-    fn owns(&self, owner: &str, id: i64) -> Result<bool> {
+    fn owns(&self, owner: &str, id: &str) -> Result<bool> {
         let n: i64 = self.tx.query_row("SELECT COUNT(*) FROM notes WHERE id=?1 AND owner=?2", params![id, owner], |r| r.get(0))?;
         Ok(n > 0)
     }
 
-    fn replace_tags(&self, id: i64, tags: &[String]) -> Result<()> {
+    fn replace_tags(&self, id: &str, tags: &[String]) -> Result<()> {
         self.tx.execute("DELETE FROM note_tags WHERE note_id=?1", [id])?;
         for t in tags {
             self.tx.execute("INSERT OR IGNORE INTO note_tags(note_id, tag) VALUES(?1, ?2)", params![id, t])?;
@@ -285,11 +383,11 @@ impl SqliteTx<'_> {
     }
 
     /// Cards with their tags and attachments, in the order of `ids`, fetched a page at a time instead of per card.
-    fn load_notes(&self, owner: &str, ids: &[i64]) -> Result<Vec<NoteRecord>> {
-        let mut by_id: HashMap<i64, NoteRecord> = HashMap::new();
+    fn load_notes(&self, owner: &str, ids: &[String]) -> Result<Vec<NoteRecord>> {
+        let mut by_id: HashMap<String, NoteRecord> = HashMap::new();
         for chunk in ids.chunks(400) {
             let ph = vec!["?"; chunk.len()].join(",");
-            let ids_only: Vec<rusqlite::types::Value> = chunk.iter().map(|i| (*i).into()).collect();
+            let ids_only: Vec<rusqlite::types::Value> = chunk.iter().map(|i| i.clone().into()).collect();
             let mut with_owner: Vec<rusqlite::types::Value> = vec![owner.to_string().into()];
             with_owner.extend(ids_only.iter().cloned());
 
@@ -312,12 +410,12 @@ impl SqliteTx<'_> {
             })?;
             for row in rows {
                 let n = row?;
-                by_id.insert(n.id, n);
+                by_id.insert(n.id.clone(), n);
             }
 
             let sql = format!("SELECT note_id, tag FROM note_tags WHERE note_id IN ({ph}) ORDER BY tag");
             let mut st = self.tx.prepare(&sql)?;
-            let rows = st.query_map(params_from_iter(ids_only.iter()), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            let rows = st.query_map(params_from_iter(ids_only.iter()), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             for row in rows {
                 let (id, tag) = row?;
                 if let Some(n) = by_id.get_mut(&id) {
@@ -340,26 +438,27 @@ impl SqliteTx<'_> {
 }
 
 impl RecordTx for SqliteTx<'_> {
-    fn insert_note(&mut self, owner: &str, n: &NoteRecord) -> Result<i64> {
+    fn insert_note(&mut self, owner: &str, n: &NoteRecord) -> Result<()> {
         let s = &n.schedule;
         self.tx.execute(
-            "INSERT INTO notes(owner, body, created_at, updated_at, remind_at, repeat, reminder_done, due_at, open_todos, position)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![owner, n.body, n.created_at, n.updated_at, s.remind_at, s.repeat, s.reminder_done as i64, s.due_at, n.open_todos, n.position],
+            "INSERT INTO notes(id, owner, body, created_at, updated_at, remind_at, repeat, reminder_done, due_at, open_todos, position)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![n.id, owner, n.body, n.created_at, n.updated_at, s.remind_at, s.repeat, s.reminder_done as i64, s.due_at, n.open_todos, n.position],
         )?;
-        let id = self.tx.last_insert_rowid();
-        self.tx.execute("INSERT INTO notes_fts(rowid, body) VALUES(?1, ?2)", params![id, n.body])?;
-        self.replace_tags(id, &n.tags)?;
+        // the search index is keyed by the table's own row number, which is not the id
+        let rowid = self.tx.last_insert_rowid();
+        self.tx.execute("INSERT INTO notes_fts(rowid, body) VALUES(?1, ?2)", params![rowid, n.body])?;
+        self.replace_tags(&n.id, &n.tags)?;
         self.changed.insert(owner.to_string());
-        Ok(id)
+        Ok(())
     }
 
-    fn get_note(&mut self, owner: &str, id: i64) -> Result<Option<NoteRecord>> {
-        Ok(self.load_notes(owner, &[id])?.pop())
+    fn get_note(&mut self, owner: &str, id: &str) -> Result<Option<NoteRecord>> {
+        Ok(self.load_notes(owner, &[id.to_string()])?.pop())
     }
 
     fn update_note(&mut self, owner: &str, n: &NoteRecord) -> Result<()> {
-        if !self.owns(owner, n.id)? {
+        if !self.owns(owner, &n.id)? {
             return Err(StoreError::NotFound);
         }
         let s = &n.schedule;
@@ -367,30 +466,29 @@ impl RecordTx for SqliteTx<'_> {
             "UPDATE notes SET body=?1, updated_at=?2, remind_at=?3, repeat=?4, reminder_done=?5, due_at=?6, open_todos=?7 WHERE id=?8 AND owner=?9",
             params![n.body, n.updated_at, s.remind_at, s.repeat, s.reminder_done as i64, s.due_at, n.open_todos, n.id, owner],
         )?;
-        self.tx.execute("UPDATE notes_fts SET body=?1 WHERE rowid=?2", params![n.body, n.id])?;
-        self.replace_tags(n.id, &n.tags)?;
+        self.tx.execute("UPDATE notes_fts SET body=?1 WHERE rowid=(SELECT rowid FROM notes WHERE id=?2)", params![n.body, n.id])?;
+        self.replace_tags(&n.id, &n.tags)?;
         self.changed.insert(owner.to_string());
         Ok(())
     }
 
-    fn set_tags(&mut self, owner: &str, id: i64, tags: &[String]) -> Result<()> {
+    fn set_tags(&mut self, owner: &str, id: &str, tags: &[String]) -> Result<()> {
         if !self.owns(owner, id)? {
             return Err(StoreError::NotFound);
         }
         self.replace_tags(id, tags)
     }
 
-    fn touch_note(&mut self, owner: &str, id: i64, updated_at: i64) -> Result<()> {
+    fn touch_note(&mut self, owner: &str, id: &str, updated_at: i64) -> Result<()> {
         self.tx.execute("UPDATE notes SET updated_at=?1 WHERE id=?2 AND owner=?3", params![updated_at, id, owner])?;
         Ok(())
     }
 
-    fn delete_note(&mut self, owner: &str, id: i64) -> Result<bool> {
-        let n = self.tx.execute("DELETE FROM notes WHERE id=?1 AND owner=?2", params![id, owner])?;
-        if n == 0 {
-            return Ok(false);
-        }
-        self.tx.execute("DELETE FROM notes_fts WHERE rowid=?1", [id])?; // tags and attachments follow by foreign key
+    fn delete_note(&mut self, owner: &str, id: &str) -> Result<bool> {
+        let rowid: Option<i64> = self.tx.query_row("SELECT rowid FROM notes WHERE id=?1 AND owner=?2", params![id, owner], |r| r.get(0)).optional()?;
+        let Some(rowid) = rowid else { return Ok(false) };
+        self.tx.execute("DELETE FROM notes WHERE id=?1 AND owner=?2", params![id, owner])?;
+        self.tx.execute("DELETE FROM notes_fts WHERE rowid=?1", [rowid])?; // tags and attachments follow by foreign key
         self.changed.insert(owner.to_string());
         Ok(true)
     }
@@ -399,7 +497,7 @@ impl RecordTx for SqliteTx<'_> {
         let mut sql = String::from("SELECT n.id FROM notes n WHERE n.owner=?");
         let mut args: Vec<rusqlite::types::Value> = vec![owner.to_string().into()];
         if !q.terms.is_empty() {
-            sql.push_str(" AND n.id IN (SELECT rowid FROM notes_fts WHERE notes_fts MATCH ?)");
+            sql.push_str(" AND n.rowid IN (SELECT rowid FROM notes_fts WHERE notes_fts MATCH ?)");
             args.push(fts_match(&q.terms).into());
         }
         if let Some(tag) = &q.tag {
@@ -422,11 +520,11 @@ impl RecordTx for SqliteTx<'_> {
         }
         args.push(q.limit.map_or(-1, |l| l as i64).into());
         args.push((q.offset as i64).into());
-        let ids: Vec<i64> = self.tx.prepare(&sql)?.query_map(params_from_iter(args), |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+        let ids: Vec<String> = self.tx.prepare(&sql)?.query_map(params_from_iter(args), |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
         self.load_notes(owner, &ids)
     }
 
-    fn slot(&mut self, owner: &str, id: i64) -> Result<Option<Slot>> {
+    fn slot(&mut self, owner: &str, id: &str) -> Result<Option<Slot>> {
         Ok(self
             .tx
             .query_row("SELECT position, open_todos > 0, due_at FROM notes WHERE id=?1 AND owner=?2", params![id, owner], |r| {
@@ -435,7 +533,7 @@ impl RecordTx for SqliteTx<'_> {
             .optional()?)
     }
 
-    fn slots(&mut self, owner: &str) -> Result<Vec<(i64, Slot)>> {
+    fn slots(&mut self, owner: &str) -> Result<Vec<(String, Slot)>> {
         let mut st = self.tx.prepare(
             "SELECT n.id, n.position, n.open_todos > 0, n.due_at FROM notes n WHERE n.owner=?1 ORDER BY (n.open_todos > 0) DESC, n.position DESC, n.id DESC",
         )?;
@@ -443,7 +541,7 @@ impl RecordTx for SqliteTx<'_> {
         Ok(v)
     }
 
-    fn set_position(&mut self, owner: &str, id: i64, position: &str) -> Result<()> {
+    fn set_position(&mut self, owner: &str, id: &str, position: &str) -> Result<()> {
         self.tx.execute("UPDATE notes SET position=?1 WHERE id=?2 AND owner=?3", params![position, id, owner])?;
         Ok(())
     }
@@ -458,25 +556,25 @@ impl RecordTx for SqliteTx<'_> {
     }
 
     fn rules(&mut self, owner: &str) -> Result<Vec<Rule>> {
-        let mut st = self.tx.prepare("SELECT id, pattern, tag FROM tag_rules WHERE owner=?1 ORDER BY id")?;
+        let mut st = self.tx.prepare("SELECT id, pattern, tag FROM tag_rules WHERE owner=?1 ORDER BY created_at, id")?;
         let rows = st.query_map([owner], |r| Ok(Rule { id: r.get(0)?, pattern: r.get(1)?, tag: r.get(2)? }))?.collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }
 
-    fn insert_rule(&mut self, owner: &str, pattern: &str, tag: &str, created_at: i64) -> Result<Rule> {
-        self.tx.execute("INSERT INTO tag_rules(owner, pattern, tag, created_at) VALUES(?1, ?2, ?3, ?4)", params![owner, pattern, tag, created_at])?;
-        Ok(Rule { id: self.tx.last_insert_rowid(), pattern: pattern.to_string(), tag: tag.to_string() })
+    fn insert_rule(&mut self, owner: &str, id: &str, pattern: &str, tag: &str, created_at: i64) -> Result<Rule> {
+        self.tx.execute("INSERT INTO tag_rules(id, owner, pattern, tag, created_at) VALUES(?1, ?2, ?3, ?4, ?5)", params![id, owner, pattern, tag, created_at])?;
+        Ok(Rule { id: id.to_string(), pattern: pattern.to_string(), tag: tag.to_string() })
     }
 
-    fn delete_rule(&mut self, owner: &str, id: i64) -> Result<bool> {
+    fn delete_rule(&mut self, owner: &str, id: &str) -> Result<bool> {
         Ok(self.tx.execute("DELETE FROM tag_rules WHERE id=?1 AND owner=?2", params![id, owner])? > 0)
     }
 
-    fn count_attachments(&mut self, owner: &str, note_id: i64) -> Result<i64> {
+    fn count_attachments(&mut self, owner: &str, note_id: &str) -> Result<i64> {
         Ok(self.tx.query_row("SELECT COUNT(*) FROM attachments WHERE note_id=?1 AND owner=?2", params![note_id, owner], |r| r.get(0))?)
     }
 
-    fn insert_attachment(&mut self, owner: &str, note_id: i64, a: &NewAttachment, created_at: i64) -> Result<Attachment> {
+    fn insert_attachment(&mut self, owner: &str, id: &str, note_id: &str, a: &NewAttachment, created_at: i64) -> Result<Attachment> {
         if !self.owns(owner, note_id)? {
             return Err(StoreError::NotFound);
         }
@@ -486,26 +584,25 @@ impl RecordTx for SqliteTx<'_> {
             |r| r.get(0),
         )?;
         self.tx.execute(
-            "INSERT INTO attachments(owner, note_id, position, blob_key, sha256, mime, bytes, width, height, name, created_at, duration_ms)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![owner, note_id, next, a.blob_key, a.sha256, a.mime, a.bytes, a.width, a.height, a.name, created_at, a.duration_ms],
+            "INSERT INTO attachments(id, owner, note_id, position, blob_key, sha256, mime, bytes, width, height, name, created_at, duration_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![id, owner, note_id, next, a.blob_key, a.sha256, a.mime, a.bytes, a.width, a.height, a.name, created_at, a.duration_ms],
         )?;
-        let id = self.tx.last_insert_rowid();
         self.get_attachment(owner, id)?.ok_or(StoreError::NotFound)
     }
 
-    fn get_attachment(&mut self, owner: &str, id: i64) -> Result<Option<Attachment>> {
+    fn get_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>> {
         let sql = format!("SELECT {ATTACHMENT_COLS} FROM attachments WHERE id=?1 AND owner=?2");
         Ok(self.tx.query_row(&sql, params![id, owner], attachment_row).optional()?)
     }
 
-    fn set_thumb(&mut self, owner: &str, id: i64, thumb_key: &str) -> Result<Option<String>> {
+    fn set_thumb(&mut self, owner: &str, id: &str, thumb_key: &str) -> Result<Option<String>> {
         let old = self.get_attachment(owner, id)?.ok_or(StoreError::NotFound)?.thumb_key;
         self.tx.execute("UPDATE attachments SET thumb_key=?1 WHERE id=?2 AND owner=?3", params![thumb_key, id, owner])?;
         Ok(old)
     }
 
-    fn delete_attachment(&mut self, owner: &str, id: i64) -> Result<Option<Attachment>> {
+    fn delete_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>> {
         let Some(a) = self.get_attachment(owner, id)? else { return Ok(None) };
         self.tx.execute("DELETE FROM attachments WHERE id=?1 AND owner=?2", params![id, owner])?;
         Ok(Some(a))
@@ -682,7 +779,7 @@ impl OwnerRecords for SqliteStore {
         {
             let conn = self.conn.lock().unwrap();
             let tx = conn.unchecked_transaction()?;
-            tx.execute("DELETE FROM notes_fts WHERE rowid IN (SELECT id FROM notes WHERE owner=?1)", [owner])?;
+            tx.execute("DELETE FROM notes_fts WHERE rowid IN (SELECT rowid FROM notes WHERE owner=?1)", [owner])?;
             tx.execute("DELETE FROM notes WHERE owner=?1", [owner])?; // tags and attachments follow by foreign key
             tx.execute("DELETE FROM attachments WHERE owner=?1", [owner])?;
             tx.execute("DELETE FROM tag_rules WHERE owner=?1", [owner])?;
@@ -751,31 +848,36 @@ mod tests {
 
     use super::*;
 
+    /// A database as every release before versions left it: the baseline schema, no version recorded.
+    fn unversioned_database(path: &std::path::Path) -> Connection {
+        let _ = std::fs::remove_file(path);
+        let mut c = Connection::open(path).unwrap();
+        c.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run_migrations(&mut c, &MIGRATIONS[..1]).unwrap();
+        c.execute_batch("PRAGMA user_version=0;").unwrap();
+        c
+    }
+
     #[test]
     fn migration_keeps_existing_order() {
         let path = std::env::temp_dir().join(format!("chuck-migrate-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let p = path.to_str().unwrap();
-        let mk = |b: &str, due: Option<i64>| NoteInput { body: b.into(), due_at: due, ..Default::default() };
-        let before: Vec<i64> = {
-            let s = SqliteStore::open(p).unwrap();
-            s.create("me", &mk("old", None)).unwrap();
-            s.create("me", &mk("late\n- [ ] x", Some(300))).unwrap();
-            s.create("me", &mk("soon\n- [ ] x", Some(100))).unwrap();
-            s.create("me", &mk("new", None)).unwrap();
-            s.create("you", &mk("yours", None)).unwrap();
-            s.list("me", &NoteQuery::default()).unwrap().into_iter().map(|n| n.id).collect()
-        };
-        // simulate a database from before manual ordering
-        {
-            let c = Connection::open(p).unwrap();
-            c.execute_batch("PRAGMA user_version=0; DROP INDEX notes_owner_position; ALTER TABLE notes DROP COLUMN position;").unwrap(); // an unversioned, older database
-            // scramble creation times so only the old rule (todos by due date, then newest first) can explain the order
-            c.execute("UPDATE notes SET created_at = id * 10", []).unwrap();
-        }
-        let s = SqliteStore::open(p).unwrap();
-        let after: Vec<i64> = s.list("me", &NoteQuery::default()).unwrap().into_iter().map(|n| n.id).collect();
-        assert_eq!(after, before);
+        let c = unversioned_database(&path);
+        // from before manual ordering: no position column. Creation times are scrambled (id * 10) so that only the old rule
+        // (open todos first by due date, then newest first) can explain the order.
+        c.execute_batch(
+            "DROP INDEX notes_owner_position; ALTER TABLE notes DROP COLUMN position;
+             INSERT INTO notes(id, owner, body, created_at, updated_at, open_todos, due_at) VALUES
+               (1, 'me', 'old', 10, 10, 0, NULL),
+               (2, 'me', 'late', 20, 20, 1, 300),
+               (3, 'me', 'soon', 30, 30, 1, 100),
+               (4, 'me', 'new', 40, 40, 0, NULL),
+               (5, 'you', 'yours', 50, 50, 0, NULL);",
+        )
+        .unwrap();
+        drop(c);
+        let s = SqliteStore::open(path.to_str().unwrap()).unwrap();
+        let bodies: Vec<String> = s.list("me", &NoteQuery::default()).unwrap().into_iter().map(|n| n.body).collect();
+        assert_eq!(bodies, vec!["soon", "late", "new", "old"]);
         assert_eq!(s.list("you", &NoteQuery::default()).unwrap().len(), 1);
         drop(s);
         let _ = std::fs::remove_file(&path);
@@ -784,18 +886,16 @@ mod tests {
     #[test]
     fn existing_databases_get_user_rows() {
         let path = std::env::temp_dir().join(format!("chuck-users-migrate-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let p = path.to_str().unwrap();
-        {
-            let s = SqliteStore::open(p).unwrap();
-            s.create("local", &NoteInput { body: "old note".into(), ..Default::default() }).unwrap();
-            s.add_rule("rules-only", "x", "y").unwrap();
-        }
-        {
-            let c = Connection::open(p).unwrap();
-            c.execute_batch("PRAGMA user_version=0; DROP TABLE users;").unwrap(); // an unversioned database from before accounts existed
-        }
-        let s = SqliteStore::open(p).unwrap();
+        let c = unversioned_database(&path);
+        // from before accounts existed: data under two owners, and no users table
+        c.execute_batch(
+            "DROP TABLE users;
+             INSERT INTO notes(id, owner, body, created_at, updated_at) VALUES (1, 'local', 'old note', 1, 1);
+             INSERT INTO tag_rules(id, owner, pattern, tag, created_at) VALUES (1, 'rules-only', 'x', 'y', 1);",
+        )
+        .unwrap();
+        drop(c);
+        let s = SqliteStore::open(path.to_str().unwrap()).unwrap();
         let ids: Vec<String> = s.list_accounts().unwrap().into_iter().map(|u| u.id).collect();
         assert_eq!(ids, vec!["local".to_string(), "rules-only".to_string()]);
         drop(s);

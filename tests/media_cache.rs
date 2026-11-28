@@ -1,5 +1,7 @@
-//! Regression test: SQLite reuses the highest row id after a delete. A new picture with a reused id must never be
-//! served (or cached) under an old picture's URL.
+//! Caching of pictures. Ids used to be database row numbers, which SQLite reuses after deleting the highest one, so a new
+//! picture could appear under an old picture's URL; that cost the version tag `v` in media URLs. Ids are unique now, and
+//! the tag stays as a second guard: a URL with an old version is never cached for long and never answered with 304 for
+//! a different file.
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -48,7 +50,7 @@ impl App {
         (s, serde_json::from_slice(&b).unwrap_or_default())
     }
 
-    async fn attach(&self, user: &str, note: i64, bytes: Vec<u8>, name: &str) -> (StatusCode, serde_json::Value) {
+    async fn attach(&self, user: &str, note: &str, bytes: Vec<u8>, name: &str) -> (StatusCode, serde_json::Value) {
         let (s, _, b) = self.call("POST", &format!("/api/notes/{note}/attachments?name={name}"), Some(user), bytes, false).await;
         (s, serde_json::from_slice(&b).unwrap_or_default())
     }
@@ -73,11 +75,11 @@ fn jpeg(salt: u8) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn reused_ids_never_serve_a_stale_picture() {
+async fn a_new_picture_is_never_served_under_an_old_pictures_url_or_etag() {
     let a = app("reuse");
-    let card = a.new_card("alice", "pics", false).await.1["id"].as_i64().unwrap();
-    let first = a.attach("alice", card, jpeg(1), "first.jpg").await.1;
-    let (id1, v1) = (first["id"].as_i64().unwrap(), first["v"].as_str().unwrap().to_string());
+    let card = a.new_card("alice", "pics", false).await.1["id"].as_str().unwrap().to_string();
+    let first = a.attach("alice", &card, jpeg(1), "first.jpg").await.1;
+    let (id1, v1) = (first["id"].as_str().unwrap().to_string(), first["v"].as_str().unwrap().to_string());
     assert_eq!(v1.len(), 16);
 
     // the current version may be cached for long, anything else must be revalidated
@@ -88,15 +90,15 @@ async fn reused_ids_never_serve_a_stale_picture() {
     let (_, h, _) = a.call("GET", &format!("/api/media/{id1}"), Some("alice"), vec![], false).await;
     assert_eq!(h["cache-control"], "private, no-cache");
 
-    // delete it and upload a different picture: SQLite hands out the same id again
+    // delete it and upload a different picture
     let (s, _, _) = a.call("DELETE", &format!("/api/media/{id1}"), Some("alice"), vec![], false).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
-    let second = a.attach("alice", card, jpeg(2), "second.jpg").await.1;
-    let (id2, v2) = (second["id"].as_i64().unwrap(), second["v"].as_str().unwrap().to_string());
-    assert_eq!(id2, id1, "this is the reuse that caused the bug");
-    assert_ne!(v2, v1, "but the version, and so the URL, is new");
+    let second = a.attach("alice", &card, jpeg(2), "second.jpg").await.1;
+    let (id2, v2) = (second["id"].as_str().unwrap().to_string(), second["v"].as_str().unwrap().to_string());
+    assert_ne!(id2, id1, "ids are never reused, which removed the cause of the old bug");
+    assert_ne!(v2, v1, "and the version, and so the URL, is new as well");
 
-    // a browser revalidating the old URL with the old ETag gets the new file, not 304
+    // a browser revalidating with the old ETag and old version, against the new picture, gets the new file, not 304
     let mut req = axum::http::Request::builder().method("GET").uri(format!("/api/media/{id2}?v={v1}")).header("x-user", "alice").header("if-none-match", &etag);
     req = req.header("accept", "*/*");
     let resp = a.router.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();

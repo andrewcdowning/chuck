@@ -173,8 +173,11 @@ Optional and breaking, decided separately: opaque string ids (B4, decision D1).
 
 All six were taken as recommended (approved by the project owner).
 
-- **D1 ids.** Keep `i64` ids (no API change, SQLite-shaped) or move to opaque string ids (ULIDs) before the cloud store.
-  Recommended: opaque ids, as its own PR after phase 2, with the page and tests updated together.
+- **D1 ids.** Done: ids of cards, files and rules are 26-character text ids (Crockford base32, ULID-shaped: creation time then
+  random bits), made by the service, never by a database, strictly increasing within a process and sorting in creation
+  order. Anything that is not an id answers 404 on every route. Existing databases are converted by schema step 3, which
+  gives every row a new id stamped with its creation time and carries tags, files, rules and the search index over.
+  This is a breaking change for anything that stored the old numeric ids.
 - **D2 ordering key.** Done: positions are base-62 text keys (`0-9A-Za-z`, never ending in `0`), compared as text. There is
   always a key between two others, so a move writes one card and nothing is renumbered. Cards added on top or dragged to
   the top or bottom lengthen keys by about one character per 60 moves; moving cards into the very same gap over and over

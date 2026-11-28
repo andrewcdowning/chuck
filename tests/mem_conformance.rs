@@ -32,6 +32,7 @@ cases!(
     attachment_cap,
     ownership_is_checked_first,
     rule_cap,
+    ids_are_opaque_and_never_reused,
     tag_suggestions_confidence_and_feedback,
     account_lifecycle
 );
@@ -58,7 +59,7 @@ fn a_failed_unit_of_work_changes_nothing() {
     use chuck::store::StoreError;
     let r = chuck_testkit::mem::MemRecords::new();
     let out: Result<(), StoreError> = r.transact(|tx: &mut dyn RecordTx| {
-        tx.insert_rule("me", "a", "b", 0)?;
+        tx.insert_rule("me", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "a", "b", 0)?;
         Err(StoreError::Invalid("stop".into()))
     });
     assert!(out.is_err());

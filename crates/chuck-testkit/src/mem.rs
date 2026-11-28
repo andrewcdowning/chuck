@@ -18,13 +18,10 @@ use std::sync::Mutex;
 
 #[derive(Clone, Default)]
 struct State {
-    next_note: i64,
-    next_attachment: i64,
-    next_rule: i64,
-    notes: BTreeMap<i64, (String, NoteRecord)>,
+    notes: BTreeMap<String, (String, NoteRecord)>,
     /// (owner, position within the card, attachment); the card is `attachment.note_id`
-    attachments: BTreeMap<i64, (String, i64, Attachment)>,
-    rules: BTreeMap<i64, (String, Rule)>,
+    attachments: BTreeMap<String, (String, i64, Attachment)>,
+    rules: BTreeMap<String, (String, Rule)>,
     versions: HashMap<String, u64>,
     feedback: Vec<(String, FeedbackEvent)>,
     users: BTreeMap<String, User>,
@@ -50,7 +47,7 @@ fn words(body: &str) -> Vec<String> {
     body.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.to_lowercase()).collect()
 }
 
-fn display_order(a: &(i64, &NoteRecord), b: &(i64, &NoteRecord)) -> std::cmp::Ordering {
+fn display_order(a: &(String, &NoteRecord), b: &(String, &NoteRecord)) -> std::cmp::Ordering {
     let (pa, pb) = (a.1.open_todos > 0, b.1.open_todos > 0);
     pb.cmp(&pa)
         .then(b.1.position.cmp(&a.1.position))
@@ -58,40 +55,38 @@ fn display_order(a: &(i64, &NoteRecord), b: &(i64, &NoteRecord)) -> std::cmp::Or
 }
 
 impl MemTx<'_> {
-    fn full(&self, id: i64) -> Option<NoteRecord> {
-        let (_, rec) = self.s.notes.get(&id)?;
+    fn full(&self, id: &str) -> Option<NoteRecord> {
+        let (_, rec) = self.s.notes.get(id)?;
         let mut rec = rec.clone();
-        let mut atts: Vec<(i64, i64, Attachment)> =
-            self.s.attachments.iter().filter(|(_, (_, _, a))| a.note_id == id).map(|(aid, (_, pos, a))| (*pos, *aid, a.clone())).collect();
-        atts.sort_by_key(|(pos, aid, _)| (*pos, *aid));
+        let mut atts: Vec<(i64, String, Attachment)> =
+            self.s.attachments.iter().filter(|(_, (_, _, a))| a.note_id == id).map(|(aid, (_, pos, a))| (*pos, aid.clone(), a.clone())).collect();
+        atts.sort_by_key(|(pos, aid, _)| (*pos, aid.clone()));
         rec.attachments = atts.into_iter().map(|(_, _, a)| a).collect();
         Some(rec)
     }
 
-    fn mine(&self, owner: &str, id: i64) -> bool {
-        self.s.notes.get(&id).is_some_and(|(o, _)| o == owner)
+    fn mine(&self, owner: &str, id: &str) -> bool {
+        self.s.notes.get(id).is_some_and(|(o, _)| o == owner)
     }
 }
 
 impl RecordTx for MemTx<'_> {
-    fn insert_note(&mut self, owner: &str, n: &NoteRecord) -> Result<i64> {
-        self.s.next_note += 1;
-        let id = self.s.next_note;
+    fn insert_note(&mut self, owner: &str, n: &NoteRecord) -> Result<()> {
+        let id = n.id.clone();
         let mut rec = n.clone();
-        rec.id = id;
         rec.attachments = vec![];
         rec.tags.sort();
         self.s.notes.insert(id, (owner.to_string(), rec));
         self.changed.insert(owner.to_string());
-        Ok(id)
+        Ok(())
     }
 
-    fn get_note(&mut self, owner: &str, id: i64) -> Result<Option<NoteRecord>> {
+    fn get_note(&mut self, owner: &str, id: &str) -> Result<Option<NoteRecord>> {
         Ok(if self.mine(owner, id) { self.full(id) } else { None })
     }
 
     fn update_note(&mut self, owner: &str, n: &NoteRecord) -> Result<()> {
-        if !self.mine(owner, n.id) {
+        if !self.mine(owner, &n.id) {
             return Err(StoreError::NotFound);
         }
         let (_, rec) = self.s.notes.get_mut(&n.id).unwrap();
@@ -105,41 +100,41 @@ impl RecordTx for MemTx<'_> {
         Ok(())
     }
 
-    fn set_tags(&mut self, owner: &str, id: i64, tags: &[String]) -> Result<()> {
+    fn set_tags(&mut self, owner: &str, id: &str, tags: &[String]) -> Result<()> {
         if !self.mine(owner, id) {
             return Err(StoreError::NotFound);
         }
-        let (_, rec) = self.s.notes.get_mut(&id).unwrap();
+        let (_, rec) = self.s.notes.get_mut(id).unwrap();
         rec.tags = tags.to_vec();
         rec.tags.sort();
         rec.tags.dedup();
         Ok(())
     }
 
-    fn touch_note(&mut self, owner: &str, id: i64, updated_at: i64) -> Result<()> {
+    fn touch_note(&mut self, owner: &str, id: &str, updated_at: i64) -> Result<()> {
         if self.mine(owner, id) {
-            self.s.notes.get_mut(&id).unwrap().1.updated_at = updated_at;
+            self.s.notes.get_mut(id).unwrap().1.updated_at = updated_at;
         }
         Ok(())
     }
 
-    fn delete_note(&mut self, owner: &str, id: i64) -> Result<bool> {
+    fn delete_note(&mut self, owner: &str, id: &str) -> Result<bool> {
         if !self.mine(owner, id) {
             return Ok(false);
         }
-        self.s.notes.remove(&id);
+        self.s.notes.remove(id);
         self.s.attachments.retain(|_, (_, _, a)| a.note_id != id);
         self.changed.insert(owner.to_string());
         Ok(true)
     }
 
     fn query_notes(&mut self, owner: &str, q: &RecordQuery) -> Result<Vec<NoteRecord>> {
-        let mut hits: Vec<(i64, &NoteRecord)> = self
+        let mut hits: Vec<(String, &NoteRecord)> = self
             .s
             .notes
             .iter()
             .filter(|(_, (o, _))| o == owner)
-            .map(|(id, (_, r))| (*id, r))
+            .map(|(id, (_, r))| (id.clone(), r))
             .filter(|(_, r)| {
                 let w = if q.terms.is_empty() { vec![] } else { words(&r.body) };
                 q.terms.iter().all(|t| {
@@ -152,27 +147,27 @@ impl RecordTx for MemTx<'_> {
             })
             .collect();
         if q.reminders_only {
-            hits.sort_by_key(|(id, r)| (r.schedule.remind_at, *id));
+            hits.sort_by_key(|(id, r)| (r.schedule.remind_at, id.clone()));
         } else {
             hits.sort_by(display_order);
         }
-        let ids: Vec<i64> = hits.into_iter().map(|(id, _)| id).skip(q.offset).take(q.limit.unwrap_or(usize::MAX)).collect();
-        Ok(ids.into_iter().filter_map(|id| self.full(id)).collect())
+        let ids: Vec<String> = hits.into_iter().map(|(id, _)| id).skip(q.offset).take(q.limit.unwrap_or(usize::MAX)).collect();
+        Ok(ids.into_iter().filter_map(|id| self.full(&id)).collect())
     }
 
-    fn slot(&mut self, owner: &str, id: i64) -> Result<Option<Slot>> {
-        Ok(self.s.notes.get(&id).filter(|(o, _)| o == owner).map(|(_, r)| Slot { pos: r.position.clone(), pinned: r.open_todos > 0, due: r.schedule.due_at }))
+    fn slot(&mut self, owner: &str, id: &str) -> Result<Option<Slot>> {
+        Ok(self.s.notes.get(id).filter(|(o, _)| o == owner).map(|(_, r)| Slot { pos: r.position.clone(), pinned: r.open_todos > 0, due: r.schedule.due_at }))
     }
 
-    fn slots(&mut self, owner: &str) -> Result<Vec<(i64, Slot)>> {
-        let mut all: Vec<(i64, &NoteRecord)> = self.s.notes.iter().filter(|(_, (o, _))| o == owner).map(|(id, (_, r))| (*id, r)).collect();
+    fn slots(&mut self, owner: &str) -> Result<Vec<(String, Slot)>> {
+        let mut all: Vec<(String, &NoteRecord)> = self.s.notes.iter().filter(|(_, (o, _))| o == owner).map(|(id, (_, r))| (id.clone(), r)).collect();
         all.sort_by(display_order);
         Ok(all.into_iter().map(|(id, r)| (id, Slot { pos: r.position.clone(), pinned: r.open_todos > 0, due: r.schedule.due_at })).collect())
     }
 
-    fn set_position(&mut self, owner: &str, id: i64, position: &str) -> Result<()> {
+    fn set_position(&mut self, owner: &str, id: &str, position: &str) -> Result<()> {
         if self.mine(owner, id) {
-            self.s.notes.get_mut(&id).unwrap().1.position = position.to_string();
+            self.s.notes.get_mut(id).unwrap().1.position = position.to_string();
         }
         Ok(())
     }
@@ -195,35 +190,32 @@ impl RecordTx for MemTx<'_> {
         Ok(self.s.rules.values().filter(|(o, _)| o == owner).map(|(_, r)| r.clone()).collect())
     }
 
-    fn insert_rule(&mut self, owner: &str, pattern: &str, tag: &str, _created_at: i64) -> Result<Rule> {
-        self.s.next_rule += 1;
-        let r = Rule { id: self.s.next_rule, pattern: pattern.to_string(), tag: tag.to_string() };
-        self.s.rules.insert(r.id, (owner.to_string(), r.clone()));
+    fn insert_rule(&mut self, owner: &str, id: &str, pattern: &str, tag: &str, _created_at: i64) -> Result<Rule> {
+        let r = Rule { id: id.to_string(), pattern: pattern.to_string(), tag: tag.to_string() };
+        self.s.rules.insert(r.id.clone(), (owner.to_string(), r.clone()));
         Ok(r)
     }
 
-    fn delete_rule(&mut self, owner: &str, id: i64) -> Result<bool> {
-        if self.s.rules.get(&id).is_some_and(|(o, _)| o == owner) {
-            self.s.rules.remove(&id);
+    fn delete_rule(&mut self, owner: &str, id: &str) -> Result<bool> {
+        if self.s.rules.get(id).is_some_and(|(o, _)| o == owner) {
+            self.s.rules.remove(id);
             return Ok(true);
         }
         Ok(false)
     }
 
-    fn count_attachments(&mut self, owner: &str, note_id: i64) -> Result<i64> {
+    fn count_attachments(&mut self, owner: &str, note_id: &str) -> Result<i64> {
         Ok(self.s.attachments.values().filter(|(o, _, a)| o == owner && a.note_id == note_id).count() as i64)
     }
 
-    fn insert_attachment(&mut self, owner: &str, note_id: i64, a: &NewAttachment, _created_at: i64) -> Result<Attachment> {
+    fn insert_attachment(&mut self, owner: &str, id: &str, note_id: &str, a: &NewAttachment, _created_at: i64) -> Result<Attachment> {
         if !self.mine(owner, note_id) {
             return Err(StoreError::NotFound);
         }
-        self.s.next_attachment += 1;
-        let id = self.s.next_attachment;
         let pos = self.s.attachments.values().filter(|(_, _, a)| a.note_id == note_id).map(|(_, pos, _)| *pos + 1).max().unwrap_or(0);
         let att = Attachment {
-            id,
-            note_id,
+            id: id.to_string(),
+            note_id: note_id.to_string(),
             mime: a.mime.clone(),
             bytes: a.bytes,
             width: a.width,
@@ -235,16 +227,16 @@ impl RecordTx for MemTx<'_> {
             blob_key: a.blob_key.clone(),
             thumb_key: None,
         };
-        self.s.attachments.insert(id, (owner.to_string(), pos, att.clone()));
+        self.s.attachments.insert(id.to_string(), (owner.to_string(), pos, att.clone()));
         Ok(att)
     }
 
-    fn get_attachment(&mut self, owner: &str, id: i64) -> Result<Option<Attachment>> {
-        Ok(self.s.attachments.get(&id).filter(|(o, _, _)| o == owner).map(|(_, _, a)| a.clone()))
+    fn get_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>> {
+        Ok(self.s.attachments.get(id).filter(|(o, _, _)| o == owner).map(|(_, _, a)| a.clone()))
     }
 
-    fn set_thumb(&mut self, owner: &str, id: i64, thumb_key: &str) -> Result<Option<String>> {
-        match self.s.attachments.get_mut(&id) {
+    fn set_thumb(&mut self, owner: &str, id: &str, thumb_key: &str) -> Result<Option<String>> {
+        match self.s.attachments.get_mut(id) {
             Some((o, _, a)) if o == owner => {
                 let old = a.thumb_key.replace(thumb_key.to_string());
                 a.has_thumb = true;
@@ -255,9 +247,9 @@ impl RecordTx for MemTx<'_> {
         }
     }
 
-    fn delete_attachment(&mut self, owner: &str, id: i64) -> Result<Option<Attachment>> {
-        if self.s.attachments.get(&id).is_some_and(|(o, _, _)| o == owner) {
-            return Ok(self.s.attachments.remove(&id).map(|(_, _, a)| a));
+    fn delete_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>> {
+        if self.s.attachments.get(id).is_some_and(|(o, _, _)| o == owner) {
+            return Ok(self.s.attachments.remove(id).map(|(_, _, a)| a));
         }
         Ok(None)
     }

@@ -4,10 +4,11 @@
 //! errors are the client's fault, how cards are ordered and placed, what a search matches. Backends only store records.
 
 use chuck_core::domain::card::{card_kind, open_items, tags_for};
-use chuck_core::domain::input;
+use chuck_core::domain::{id as idshape, input};
 use chuck_core::domain::order;
 use chuck_core::domain::schedule::{self, ScheduleInput};
 use chuck_core::domain::search;
+use crate::ids;
 use crate::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
 use crate::store::*;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,6 +26,15 @@ pub fn system_now() -> i64 {
 pub struct NoteService<'a, R: NoteRecords> {
     records: &'a R,
     now: fn() -> i64,
+}
+
+/// An id that cannot be one of ours names nothing, so asking for it is the same as asking for a card that is not there.
+fn known(id: &str) -> Result<()> {
+    if idshape::is_valid(id) {
+        Ok(())
+    } else {
+        Err(StoreError::NotFound)
+    }
 }
 
 fn schedule_input(i: &NoteInput) -> ScheduleInput<'_> {
@@ -78,13 +88,15 @@ impl<'a, R: NoteRecords> NoteService<'a, R> {
             let open = open_items(body);
             let position = new_position(tx, owner, open > 0, sch.due_at)?;
             let tags = tags_for(&rule_pairs(tx, owner)?, body);
-            let rec = NoteRecord { id: 0, body: body.to_string(), created_at: t, updated_at: t, schedule: sch, open_todos: open, position, tags, attachments: vec![] };
-            let id = tx.insert_note(owner, &rec)?;
-            tx.get_note(owner, id)?.map(to_note).ok_or(StoreError::NotFound)
+            let id = ids::new_id();
+            let rec = NoteRecord { id: id.clone(), body: body.to_string(), created_at: t, updated_at: t, schedule: sch, open_todos: open, position, tags, attachments: vec![] };
+            tx.insert_note(owner, &rec)?;
+            tx.get_note(owner, &id)?.map(to_note).ok_or(StoreError::NotFound)
         })
     }
 
-    pub fn update(&self, owner: &str, id: i64, input: &NoteInput) -> Result<Note> {
+    pub fn update(&self, owner: &str, id: &str, input: &NoteInput) -> Result<Note> {
+        known(id)?;
         let t = (self.now)();
         self.records.transact(|tx| {
             let cur = tx.get_note(owner, id)?.ok_or(StoreError::NotFound)?;
@@ -102,7 +114,8 @@ impl<'a, R: NoteRecords> NoteService<'a, R> {
         })
     }
 
-    pub fn delete(&self, owner: &str, id: i64) -> Result<()> {
+    pub fn delete(&self, owner: &str, id: &str) -> Result<()> {
+        known(id)?;
         self.records.transact(|tx| if tx.delete_note(owner, id)? { Ok(()) } else { Err(StoreError::NotFound) })
     }
 
@@ -119,7 +132,8 @@ impl<'a, R: NoteRecords> NoteService<'a, R> {
         self.records.transact(|tx| Ok(tx.query_notes(owner, &rq)?.into_iter().map(to_note).collect()))
     }
 
-    pub fn get(&self, owner: &str, id: i64) -> Result<Note> {
+    pub fn get(&self, owner: &str, id: &str) -> Result<Note> {
+        known(id)?;
         self.records.transact(|tx| tx.get_note(owner, id)?.map(to_note).ok_or(StoreError::NotFound))
     }
 
@@ -127,12 +141,16 @@ impl<'a, R: NoteRecords> NoteService<'a, R> {
         self.records.transact(|tx| tx.tag_counts(owner))
     }
 
-    pub fn move_note(&self, owner: &str, id: i64, prev: Option<i64>, next: Option<i64>) -> Result<Note> {
+    pub fn move_note(&self, owner: &str, id: &str, prev: Option<&str>, next: Option<&str>) -> Result<Note> {
+        known(id)?;
+        for neighbour in [prev, next].into_iter().flatten() {
+            known(neighbour)?;
+        }
         self.records.transact(|tx| {
             // Ownership first: someone else's card is NotFound whatever else is wrong with the request.
             let me = tx.slot(owner, id)?.ok_or(StoreError::NotFound)?;
             order::check_request(id, prev, next).map_err(move_error)?;
-            let neighbour = |tx: &mut dyn RecordTx, n: Option<i64>| -> Result<Option<(String, bool)>> {
+            let neighbour = |tx: &mut dyn RecordTx, n: Option<&str>| -> Result<Option<(String, bool)>> {
                 n.map(|n| tx.slot(owner, n)?.map(|s| (s.pos, s.pinned)).ok_or(StoreError::NotFound)).transpose()
             };
             let above = neighbour(tx, prev)?;
@@ -154,11 +172,12 @@ impl<'a, R: NoteRecords> NoteService<'a, R> {
             if tx.rules(owner)?.len() >= MAX_RULES {
                 return Err(StoreError::Invalid("too many rules".into()));
             }
-            tx.insert_rule(owner, pattern, tag, t)
+            tx.insert_rule(owner, &ids::new_id(), pattern, tag, t)
         })
     }
 
-    pub fn delete_rule(&self, owner: &str, id: i64) -> Result<()> {
+    pub fn delete_rule(&self, owner: &str, id: &str) -> Result<()> {
+        known(id)?;
         self.records.transact(|tx| if tx.delete_rule(owner, id)? { Ok(()) } else { Err(StoreError::NotFound) })
     }
 
@@ -174,7 +193,7 @@ impl<'a, R: NoteRecords> NoteService<'a, R> {
                 let mut before = n.tags.clone();
                 before.sort();
                 if before != after {
-                    tx.set_tags(owner, n.id, &after)?;
+                    tx.set_tags(owner, &n.id, &after)?;
                     changed += 1;
                 }
             }
@@ -182,29 +201,33 @@ impl<'a, R: NoteRecords> NoteService<'a, R> {
         })
     }
 
-    pub fn add_attachment(&self, owner: &str, note_id: i64, a: &NewAttachment) -> Result<Attachment> {
+    pub fn add_attachment(&self, owner: &str, note_id: &str, a: &NewAttachment) -> Result<Attachment> {
+        known(note_id)?;
         let t = (self.now)();
         self.records.transact(|tx| {
             tx.slot(owner, note_id)?.ok_or(StoreError::NotFound)?;
             if !input::has_room_for_attachment(tx.count_attachments(owner, note_id)?) {
                 return Err(StoreError::Invalid("too many attachments on this card".into()));
             }
-            let att = tx.insert_attachment(owner, note_id, a, t)?;
+            let att = tx.insert_attachment(owner, &ids::new_id(), note_id, a, t)?;
             tx.touch_note(owner, note_id, t)?;
             Ok(att)
         })
     }
 
-    pub fn attachment(&self, owner: &str, id: i64) -> Result<Attachment> {
+    pub fn attachment(&self, owner: &str, id: &str) -> Result<Attachment> {
+        known(id)?;
         self.records.transact(|tx| tx.get_attachment(owner, id)?.ok_or(StoreError::NotFound))
     }
 
     /// Returns the key of the preview this replaced, if it was a different one.
-    pub fn set_attachment_thumb(&self, owner: &str, id: i64, thumb_key: &str) -> Result<Option<String>> {
+    pub fn set_attachment_thumb(&self, owner: &str, id: &str, thumb_key: &str) -> Result<Option<String>> {
+        known(id)?;
         self.records.transact(|tx| Ok(tx.set_thumb(owner, id, thumb_key)?.filter(|k| k != thumb_key)))
     }
 
-    pub fn delete_attachment(&self, owner: &str, id: i64) -> Result<Attachment> {
+    pub fn delete_attachment(&self, owner: &str, id: &str) -> Result<Attachment> {
+        known(id)?;
         self.records.transact(|tx| tx.delete_attachment(owner, id)?.ok_or(StoreError::NotFound))
     }
 
@@ -227,10 +250,10 @@ macro_rules! note_service_methods {
         fn create(&self, owner: &str, input: &$crate::store::NoteInput) -> $crate::store::Result<$crate::store::Note> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).create(owner, input)
         }
-        fn update(&self, owner: &str, id: i64, input: &$crate::store::NoteInput) -> $crate::store::Result<$crate::store::Note> {
+        fn update(&self, owner: &str, id: &str, input: &$crate::store::NoteInput) -> $crate::store::Result<$crate::store::Note> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).update(owner, id, input)
         }
-        fn delete(&self, owner: &str, id: i64) -> $crate::store::Result<()> {
+        fn delete(&self, owner: &str, id: &str) -> $crate::store::Result<()> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).delete(owner, id)
         }
         fn list(&self, owner: &str, q: &$crate::store::NoteQuery) -> $crate::store::Result<Vec<$crate::store::Note>> {
@@ -239,10 +262,10 @@ macro_rules! note_service_methods {
         fn tags(&self, owner: &str) -> $crate::store::Result<Vec<$crate::store::TagCount>> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).tags(owner)
         }
-        fn get(&self, owner: &str, id: i64) -> $crate::store::Result<$crate::store::Note> {
+        fn get(&self, owner: &str, id: &str) -> $crate::store::Result<$crate::store::Note> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).get(owner, id)
         }
-        fn move_note(&self, owner: &str, id: i64, prev: Option<i64>, next: Option<i64>) -> $crate::store::Result<$crate::store::Note> {
+        fn move_note(&self, owner: &str, id: &str, prev: Option<&str>, next: Option<&str>) -> $crate::store::Result<$crate::store::Note> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).move_note(owner, id, prev, next)
         }
         fn rules(&self, owner: &str) -> $crate::store::Result<Vec<$crate::store::Rule>> {
@@ -251,22 +274,22 @@ macro_rules! note_service_methods {
         fn add_rule(&self, owner: &str, pattern: &str, tag: &str) -> $crate::store::Result<$crate::store::Rule> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).add_rule(owner, pattern, tag)
         }
-        fn delete_rule(&self, owner: &str, id: i64) -> $crate::store::Result<()> {
+        fn delete_rule(&self, owner: &str, id: &str) -> $crate::store::Result<()> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).delete_rule(owner, id)
         }
         fn apply_rules(&self, owner: &str) -> $crate::store::Result<usize> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).apply_rules(owner)
         }
-        fn add_attachment(&self, owner: &str, note_id: i64, a: &$crate::store::NewAttachment) -> $crate::store::Result<$crate::store::Attachment> {
+        fn add_attachment(&self, owner: &str, note_id: &str, a: &$crate::store::NewAttachment) -> $crate::store::Result<$crate::store::Attachment> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).add_attachment(owner, note_id, a)
         }
-        fn attachment(&self, owner: &str, id: i64) -> $crate::store::Result<$crate::store::Attachment> {
+        fn attachment(&self, owner: &str, id: &str) -> $crate::store::Result<$crate::store::Attachment> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).attachment(owner, id)
         }
-        fn set_attachment_thumb(&self, owner: &str, id: i64, thumb_key: &str) -> $crate::store::Result<Option<String>> {
+        fn set_attachment_thumb(&self, owner: &str, id: &str, thumb_key: &str) -> $crate::store::Result<Option<String>> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).set_attachment_thumb(owner, id, thumb_key)
         }
-        fn delete_attachment(&self, owner: &str, id: i64) -> $crate::store::Result<$crate::store::Attachment> {
+        fn delete_attachment(&self, owner: &str, id: &str) -> $crate::store::Result<$crate::store::Attachment> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).delete_attachment(owner, id)
         }
         fn blob_referenced(&self, owner: &str, key: &str) -> $crate::store::Result<bool> {

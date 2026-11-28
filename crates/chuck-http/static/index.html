@@ -1297,7 +1297,7 @@ function groupNeighbours(card) {
   let p = card.previousElementSibling, n = card.nextElementSibling;
   while (p && !sameGroup(card, p)) p = p.previousElementSibling;
   while (n && !sameGroup(card, n)) n = n.nextElementSibling;
-  return { prev: p ? Number(p.dataset.id) : null, next: n ? Number(n.dataset.id) : null };
+  return { prev: p ? p.dataset.id : null, next: n ? n.dataset.id : null };
 }
 const say = text => { $("live").textContent = text; };
 function originOf(card) { return { parent: card.parentElement, nextNode: card.nextSibling, ...groupNeighbours(card) }; }

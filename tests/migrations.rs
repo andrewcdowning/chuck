@@ -27,12 +27,22 @@ fn a_new_database_is_stamped_with_the_latest_version() {
 fn an_unversioned_database_keeps_its_data_and_gets_a_version() {
     let p = temp_db("legacy");
     {
-        let s = SqliteStore::open(&p).unwrap();
-        s.create("me", &NoteInput { body: "kept #tag".into(), ..Default::default() }).unwrap();
+        // the schema every release before versions used, with a card, a tag and a file on it
+        let mut c = Connection::open(&p).unwrap();
+        c.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run_migrations(&mut c, &MIGRATIONS[..1]).unwrap();
+        c.execute_batch(
+            "PRAGMA user_version=0;
+             INSERT INTO notes(id, owner, body, created_at, updated_at, position) VALUES (1, 'me', 'kept #tag', 5, 5, 3.0);
+             INSERT INTO notes_fts(rowid, body) VALUES (1, 'kept #tag');
+             INSERT INTO note_tags(note_id, tag) VALUES (1, 'tag');",
+        )
+        .unwrap();
     }
-    Connection::open(&p).unwrap().execute_batch("PRAGMA user_version=0;").unwrap(); // as every database before versions
     let s = SqliteStore::open(&p).unwrap();
-    assert_eq!(s.list("me", &Default::default()).unwrap()[0].body, "kept #tag");
+    let cards = s.list("me", &Default::default()).unwrap();
+    assert_eq!((cards[0].body.as_str(), cards[0].tags.clone()), ("kept #tag", vec!["tag".to_string()]));
+    assert_eq!(s.list("me", &chuck::store::NoteQuery { q: Some("kept".into()), ..Default::default() }).unwrap().len(), 1, "search still finds it");
     drop(s);
     assert_eq!(version(&p), MIGRATIONS.len() as i64);
     let _ = std::fs::remove_file(&p);
@@ -89,7 +99,7 @@ fn a_failed_step_leaves_the_previous_version_and_no_partial_changes() {
 fn positions_become_text_and_every_board_keeps_its_order() {
     let p = temp_db("positions");
     let (before, big_before) = {
-        // a database as the previous release left it: step 1 only, positions are numbers
+        // a database as the release before text positions left it: step 1 only, positions are numbers
         let mut c = Connection::open(&p).unwrap();
         c.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         run_migrations(&mut c, &MIGRATIONS[..1]).unwrap();
@@ -109,33 +119,99 @@ fn positions_become_text_and_every_board_keeps_its_order() {
         for i in 0..200 {
             ins("big", 1000 + i, 0, (i as f64) * 1.5);
         }
-        let order = |c: &Connection, owner: &str| -> Vec<i64> {
-            let mut st = c.prepare("SELECT id FROM notes WHERE owner=?1 ORDER BY (open_todos > 0) DESC, position DESC, id DESC").unwrap();
+        let order = |c: &Connection, owner: &str| -> Vec<String> {
+            let mut st = c.prepare("SELECT body FROM notes WHERE owner=?1 ORDER BY (open_todos > 0) DESC, position DESC, id DESC").unwrap();
             st.query_map([owner], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
         };
         (order(&c, "me"), order(&c, "big"))
     };
 
     let s = SqliteStore::open(&p).unwrap();
-    let ids = |owner: &str| s.list(owner, &chuck::store::NoteQuery { limit: Some(200), ..Default::default() }).unwrap().into_iter().map(|n| n.id).collect::<Vec<_>>();
-    assert_eq!(ids("me"), before, "the board is exactly as it was");
-    assert_eq!(ids("big"), big_before);
-    assert_eq!(ids("you"), vec![100]);
+    let cards = |owner: &str| s.list(owner, &chuck::store::NoteQuery { limit: Some(200), ..Default::default() }).unwrap();
+    let bodies = |owner: &str| cards(owner).into_iter().map(|n| n.body).collect::<Vec<_>>();
+    assert_eq!(bodies("me"), before, "the board is exactly as it was");
+    assert_eq!(bodies("big"), big_before);
+    assert_eq!(bodies("you"), vec!["card 100".to_string()]);
 
     // new cards and moves work on the converted data
     let top = s.create("me", &NoteInput { body: "new".into(), ..Default::default() }).unwrap().id;
-    assert_eq!(ids("me").iter().position(|i| *i == top), Some(before.iter().take_while(|i| [4, 2].contains(i)).count()), "a new card goes above the other cards (below open todos)");
-    s.move_note("me", 7, Some(1), Some(3)).unwrap();
-    let after = ids("me");
-    let at = |id: i64| after.iter().position(|i| *i == id).unwrap();
-    assert!(at(1) < at(7) && at(7) < at(3));
+    let after = cards("me");
+    let pinned = before.iter().take_while(|b| ["card 4", "card 2"].contains(&b.as_str())).count();
+    assert_eq!(after.iter().position(|n| n.id == top), Some(pinned), "a new card goes above the other cards (below open todos)");
+    let id_of = |body: &str| after.iter().find(|n| n.body == body).unwrap().id.clone();
+    s.move_note("me", &id_of("card 7"), Some(&id_of("card 1")), Some(&id_of("card 3"))).unwrap();
+    let moved: Vec<String> = bodies("me");
+    let at = |b: &str| moved.iter().position(|x| x == b).unwrap();
+    assert!(at("card 1") < at("card 7") && at("card 7") < at("card 3"));
     drop(s);
 
     let c = Connection::open(&p).unwrap();
-    assert_eq!(version(&p), 2);
+    assert_eq!(version(&p), MIGRATIONS.len() as i64);
     let types: Vec<String> = c.prepare("SELECT DISTINCT typeof(position) FROM notes").unwrap().query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
     assert_eq!(types, vec!["text"]);
     let index: i64 = c.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='notes_owner_position'", [], |r| r.get(0)).unwrap();
     assert_eq!(index, 1);
+    let _ = std::fs::remove_file(&p);
+}
+
+#[test]
+fn ids_become_text_and_everything_attached_to_a_card_follows() {
+    let p = temp_db("ids");
+    {
+        // a database as the release before text ids left it: steps 1 and 2, ids are row numbers
+        let mut c = Connection::open(&p).unwrap();
+        c.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run_migrations(&mut c, &MIGRATIONS[..2]).unwrap();
+        assert_eq!(version(&p), 2);
+        c.execute_batch(
+            "INSERT INTO notes(id, owner, body, created_at, updated_at, position) VALUES
+               (7, 'ann', 'first card about lambda #aws', 1000, 1000, 'B'),
+               (9, 'ann', 'second card about milk #home', 1000, 1000, 'C'),
+               (3, 'bob', 'bobs private card', 500, 500, 'B');
+             INSERT INTO notes_fts(rowid, body) SELECT id, body FROM notes;
+             INSERT INTO note_tags(note_id, tag) VALUES (7, 'aws'), (9, 'home'), (3, 'private');
+             INSERT INTO attachments(id, owner, note_id, position, blob_key, thumb_key, sha256, mime, bytes, width, height, name, created_at)
+               VALUES (5, 'ann', 7, 0, 'k1', 'k1t', 'x', 'image/png', 10, 1, 1, 'a.png', 1001),
+                      (6, 'ann', 7, 1, 'k2', NULL, 'x', 'image/png', 20, 1, 1, 'b.png', 1002);
+             INSERT INTO tag_rules(id, owner, pattern, tag, created_at) VALUES (2, 'ann', 'milk', 'home', 900), (1, 'ann', 'lambda', 'aws', 800);",
+        )
+        .unwrap();
+    }
+
+    let s = SqliteStore::open(&p).unwrap();
+    let list = |o: &str| s.list(o, &Default::default()).unwrap();
+    let ann = list("ann");
+    assert_eq!(ann.len(), 2);
+    for n in list("ann").iter().chain(list("bob").iter()) {
+        assert!(chuck::domain::id::is_valid(&n.id), "{}", n.id);
+    }
+    let first = ann.iter().find(|n| n.body.starts_with("first")).unwrap();
+    let second = ann.iter().find(|n| n.body.starts_with("second")).unwrap();
+    assert!(first.id < second.id, "ids sort in creation order (ties by old id)");
+    assert_eq!(first.tags, vec!["aws"]);
+    assert_eq!(first.attachments.iter().map(|a| (a.name.clone().unwrap(), a.has_thumb, a.note_id == first.id)).collect::<Vec<_>>(), vec![("a.png".to_string(), true, true), ("b.png".to_string(), false, true)]);
+    assert!(first.attachments.iter().all(|a| chuck::domain::id::is_valid(&a.id)));
+    assert_eq!(s.rules("ann").unwrap().iter().map(|r| r.pattern.as_str()).collect::<Vec<_>>(), vec!["lambda", "milk"], "rules keep their order");
+    assert!(s.rules("ann").unwrap().iter().all(|r| chuck::domain::id::is_valid(&r.id)));
+
+    // search finds the cards through the rebuilt index, and only the owner's
+    let found = |o: &str, q: &str| s.list(o, &chuck::store::NoteQuery { q: Some(q.into()), ..Default::default() }).unwrap().len();
+    assert_eq!((found("ann", "lambda"), found("ann", "private"), found("bob", "private")), (1, 0, 1));
+    // new work uses the new tables: ids, search, tags, deleting with cascades
+    let c3 = s.create("ann", &NoteInput { body: "third card #aws".into(), ..Default::default() }).unwrap();
+    assert!(c3.id > second.id);
+    assert_eq!(found("ann", "third"), 1);
+    s.delete("ann", &first.id).unwrap();
+    assert_eq!((found("ann", "lambda"), s.attachment("ann", &first.attachments[0].id).is_err()), (0, true), "the card's search entry and files went with it");
+    drop(s);
+
+    let c = Connection::open(&p).unwrap();
+    assert_eq!(version(&p), MIGRATIONS.len() as i64);
+    let violations: i64 = c.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0)).unwrap();
+    assert_eq!(violations, 0);
+    let refs: Vec<String> = c.prepare("SELECT \"table\" FROM pragma_foreign_key_list('attachments')").unwrap().query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+    assert_eq!(refs, vec!["notes"], "files refer to the renamed table");
+    let types: Vec<String> = c.prepare("SELECT typeof(id) FROM notes UNION SELECT typeof(id) FROM attachments UNION SELECT typeof(id) FROM tag_rules").unwrap().query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+    assert_eq!(types, vec!["text"]);
     let _ = std::fs::remove_file(&p);
 }

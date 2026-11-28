@@ -3,6 +3,7 @@
 //! re-exports what its callers used to find there.
 
 pub mod card;
+pub mod id;
 pub mod input;
 pub mod order;
 pub mod schedule;
@@ -15,6 +16,7 @@ mod tests {
     fn domain_does_not_depend_on_storage_or_http() {
         let files = [
             ("card.rs", include_str!("card.rs")),
+            ("id.rs", include_str!("id.rs")),
             ("input.rs", include_str!("input.rs")),
             ("order.rs", include_str!("order.rs")),
             ("schedule.rs", include_str!("schedule.rs")),
