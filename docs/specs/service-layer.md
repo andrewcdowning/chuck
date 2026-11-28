@@ -1,6 +1,6 @@
 # Spec: service layer and the three planes
 
-Status: approved. Decisions D1 to D6 were taken as recommended. Phase 0 is in progress; later phases are not built.
+Status: approved. Decisions D1 to D6 were taken as recommended. Phase 0 (PR #21) and phase 1 (PR #22) are built; later phases are not.
 
 Fixes findings A1 to A7 and B1 to B8 in [../ARCHITECTURE-REVIEW.md](../ARCHITECTURE-REVIEW.md), and prepares the split into
 packages needed for API Gateway and Lambda.
@@ -136,7 +136,7 @@ is the safety net for the rest.
 
 0. **Conformance tests.** Move the store-level tests into a suite that runs against any `NoteStore` (ordering, search
    prefixes, update semantics, attachment cap, ownership, cascade delete). State the search contract (B3).
-1. **Pure core.** Extract the pure domain functions into `core` modules with no store access, including ordering as a
+1. **Pure core** (built as `src/domain/`, a module for now and a crate in phase 7; the fractional-index key from D2 is not part of it and ships as its own PR with the data migration). Extract the pure domain functions into `core` modules with no store access, including ordering as a
    fractional-index key and the update/re-arm rules as functions. `sqlite.rs` calls them. Unit-tested without a database.
 2. **Data services.** Introduce `NoteService`, `MediaService` and the thin `NoteRecords`/`BlobStore` traits. Rewrite
    `SqliteStore` as a records backend. Fixes A2 (batched loads), A7 (typed errors), B1, B2, B7.
