@@ -4,6 +4,7 @@
 
 pub mod blob;
 pub mod ids;
+pub mod media;
 pub mod owner;
 pub mod records;
 pub mod service;

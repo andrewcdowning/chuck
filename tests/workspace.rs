@@ -77,3 +77,30 @@ fn every_crate_in_the_directory_is_listed_here() {
     let forbidden: BTreeSet<String> = FORBIDDEN.iter().map(|(n, _)| n.to_string()).collect();
     assert_eq!(forbidden, listed);
 }
+
+/// Where files are kept is the data plane's business. The shared types and the HTTP edge must not name storage keys or touch
+/// the file store directly: they ask the media service, and what clients see carries no key.
+#[test]
+fn storage_keys_stay_in_the_data_plane() {
+    fn sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                sources(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push((p.display().to_string(), std::fs::read_to_string(&p).unwrap()));
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates");
+    let mut files = Vec::new();
+    for c in ["chuck-core", "chuck-http"] {
+        sources(&root.join(c).join("src"), &mut files);
+    }
+    assert!(files.len() >= 10, "found only {} source files", files.len());
+    for (path, text) in files {
+        for banned in ["blob_key", "thumb_key", "BlobRef", "key_for(", "sha256_hex", "blobs.put(", "blobs.get(", "blobs.delete("] {
+            assert!(!text.contains(banned), "{path} must not use `{banned}`: storage keys and file access belong to chuck-data");
+        }
+    }
+}

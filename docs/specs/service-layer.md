@@ -136,6 +136,9 @@ The workspace follows the table, with these differences:
 - `chuck-mgmt` holds the admin service and the sweeper but not the command-line tool. `eval-tags` opens a concrete backend
   (SQLite), so it stays in the top-level `chuck` package, which is also the binary.
 - `chuck-testkit` is new: the conformance suite and the in-memory backend. It is used by tests only.
+- Files go through `chuck_data::media::MediaService`, which checks an upload, keeps its bytes in the `BlobStore`, records the
+  attachment and reads it back. The HTTP crate no longer touches the file store or names a storage key; what leaves the data
+  plane is an `Attachment` without keys. `BlobRef` is the opaque name of a stored file.
 - `OwnerRecords` and `Usage` (what the data plane tells the control plane) are in `chuck-data`, which keeps `chuck-data`
   free of any dependency on `chuck-control`. `chuck-control` re-exports them and defines `Store`, the trait that combines
   `NoteStore`, `AccountRecords` and `OwnerRecords`; servers and the HTTP edge are built on `dyn Store`.

@@ -21,7 +21,7 @@ README).
 | B3 search contract | Fixed (PR #21): stated and tested for every backend |
 | B4 ids are rowids | Fixed (D1): ids of cards, files and rules are 26-character text ids made by the service, never reused, sorting in creation order; the stale-picture class of bug cannot recur. Breaking change for API clients (see docs/API.md) |
 | B5 tag model welded to the store | Fixed (PR #24) |
-| B6 storage keys in the domain | Open |
+| B6 storage keys in the domain | Fixed: `Attachment` (what clients see) and the shared types carry no storage key. Where bytes live is a `BlobRef`, known only to `chuck-data`'s media service and the record stores; `blob_referenced` is gone (the sweeper works from the list of names in use). A test fails if the shared types or the HTTP crate name a key or touch the file store |
 | B7 transaction assumptions | Fixed (PR #23): `transact` |
 | B8 clock and sync trait | Partly: services take a clock; the traits are still synchronous (decision D4) |
 

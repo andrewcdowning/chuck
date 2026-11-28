@@ -24,7 +24,8 @@ pub struct Note {
     pub attachments: Vec<Attachment>,
 }
 
-/// A file attached to a note. The storage keys are never sent to clients; files are served by id after an owner check.
+/// A file attached to a note, as clients see it. Nothing here says where the bytes are kept: files are served by id after an
+/// owner check, and the data plane alone knows how they are stored.
 #[derive(Debug, Clone, Serialize)]
 pub struct Attachment {
     pub id: String,
@@ -40,23 +41,8 @@ pub struct Attachment {
     pub name: Option<String>,
     pub has_thumb: bool,
     /// Changes whenever the stored file or its preview changes. Clients put it in the media URL so a browser never
-    /// shows a cached picture for an id that has been reused (SQLite reuses the highest id after a delete).
+    /// shows a cached picture for a file that has been replaced.
     pub v: String,
-    #[serde(skip)]
-    pub blob_key: String,
-    #[serde(skip)]
-    pub thumb_key: Option<String>,
-}
-
-pub struct NewAttachment {
-    pub mime: String,
-    pub bytes: i64,
-    pub width: Option<i64>,
-    pub height: Option<i64>,
-    pub duration_ms: Option<i64>,
-    pub name: Option<String>,
-    pub blob_key: String,
-    pub sha256: String,
 }
 
 /// Create/update payload. On update, an absent field means "unchanged";
