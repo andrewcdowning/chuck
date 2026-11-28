@@ -9,7 +9,8 @@
 
 use chuck_control::{AccountRecords, OwnerRecords, Usage};
 use chuck_core::domain::order::Slot;
-use chuck_data::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
+use chuck_data::blob::BlobRef;
+use chuck_data::records::{AttachmentRecord, NoteRecord, NoteRecords, RecordQuery, RecordTx};
 use chuck_data::service::HasRecords;
 use chuck_data::store::*;
 use chuck_data::tagmodel::{FeedbackCount, HasTagModel, ModelCache, TagModelService, TagSource};
@@ -20,7 +21,7 @@ use std::sync::Mutex;
 struct State {
     notes: BTreeMap<String, (String, NoteRecord)>,
     /// (owner, position within the card, attachment); the card is `attachment.note_id`
-    attachments: BTreeMap<String, (String, i64, Attachment)>,
+    attachments: BTreeMap<String, (String, i64, AttachmentRecord)>,
     rules: BTreeMap<String, (String, Rule)>,
     versions: HashMap<String, u64>,
     feedback: Vec<(String, FeedbackEvent)>,
@@ -58,7 +59,7 @@ impl MemTx<'_> {
     fn full(&self, id: &str) -> Option<NoteRecord> {
         let (_, rec) = self.s.notes.get(id)?;
         let mut rec = rec.clone();
-        let mut atts: Vec<(i64, String, Attachment)> =
+        let mut atts: Vec<(i64, String, AttachmentRecord)> =
             self.s.attachments.iter().filter(|(_, (_, _, a))| a.note_id == id).map(|(aid, (_, pos, a))| (*pos, aid.clone(), a.clone())).collect();
         atts.sort_by_key(|(pos, aid, _)| (*pos, aid.clone()));
         rec.attachments = atts.into_iter().map(|(_, _, a)| a).collect();
@@ -208,12 +209,12 @@ impl RecordTx for MemTx<'_> {
         Ok(self.s.attachments.values().filter(|(o, _, a)| o == owner && a.note_id == note_id).count() as i64)
     }
 
-    fn insert_attachment(&mut self, owner: &str, id: &str, note_id: &str, a: &NewAttachment, _created_at: i64) -> Result<Attachment> {
+    fn insert_attachment(&mut self, owner: &str, id: &str, note_id: &str, a: &NewAttachment, _created_at: i64) -> Result<AttachmentRecord> {
         if !self.mine(owner, note_id) {
             return Err(StoreError::NotFound);
         }
         let pos = self.s.attachments.values().filter(|(_, _, a)| a.note_id == note_id).map(|(_, pos, _)| *pos + 1).max().unwrap_or(0);
-        let att = Attachment {
+        let att = AttachmentRecord {
             id: id.to_string(),
             note_id: note_id.to_string(),
             mime: a.mime.clone(),
@@ -222,40 +223,33 @@ impl RecordTx for MemTx<'_> {
             height: a.height,
             duration_ms: a.duration_ms,
             name: a.name.clone(),
-            has_thumb: false,
-            v: chuck_data::blob::attachment_version(&a.blob_key, None),
-            blob_key: a.blob_key.clone(),
-            thumb_key: None,
+            sha256: a.sha256.clone(),
+            file: a.file.clone(),
+            preview: None,
         };
         self.s.attachments.insert(id.to_string(), (owner.to_string(), pos, att.clone()));
         Ok(att)
     }
 
-    fn get_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>> {
+    fn get_attachment(&mut self, owner: &str, id: &str) -> Result<Option<AttachmentRecord>> {
         Ok(self.s.attachments.get(id).filter(|(o, _, _)| o == owner).map(|(_, _, a)| a.clone()))
     }
 
-    fn set_thumb(&mut self, owner: &str, id: &str, thumb_key: &str) -> Result<Option<String>> {
+    fn set_thumb(&mut self, owner: &str, id: &str, preview: &BlobRef) -> Result<()> {
         match self.s.attachments.get_mut(id) {
             Some((o, _, a)) if o == owner => {
-                let old = a.thumb_key.replace(thumb_key.to_string());
-                a.has_thumb = true;
-                a.v = chuck_data::blob::attachment_version(&a.blob_key, a.thumb_key.as_deref());
-                Ok(old)
+                a.preview = Some(preview.clone());
+                Ok(())
             }
             _ => Err(StoreError::NotFound),
         }
     }
 
-    fn delete_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>> {
+    fn delete_attachment(&mut self, owner: &str, id: &str) -> Result<Option<AttachmentRecord>> {
         if self.s.attachments.get(id).is_some_and(|(o, _, _)| o == owner) {
             return Ok(self.s.attachments.remove(id).map(|(_, _, a)| a));
         }
         Ok(None)
-    }
-
-    fn blob_referenced(&mut self, owner: &str, key: &str) -> Result<bool> {
-        Ok(self.s.attachments.values().any(|(o, _, a)| o == owner && (a.blob_key == key || a.thumb_key.as_deref() == Some(key))))
     }
 }
 
@@ -392,7 +386,7 @@ impl OwnerRecords for MemRecords {
     fn blob_keys(&self, owner: &str) -> Result<Vec<String>> {
         let st = self.state.lock().unwrap();
         let mut keys: Vec<String> =
-            st.attachments.values().filter(|(o, _, _)| o == owner).flat_map(|(_, _, a)| std::iter::once(a.blob_key.clone()).chain(a.thumb_key.clone())).collect();
+            st.attachments.values().filter(|(o, _, _)| o == owner).flat_map(|(_, _, a)| std::iter::once(a.file.key().to_string()).chain(a.preview.as_ref().map(|p| p.key().to_string()))).collect();
         keys.sort();
         keys.dedup();
         Ok(keys)
@@ -400,7 +394,7 @@ impl OwnerRecords for MemRecords {
 
     fn all_blob_keys(&self) -> Result<Vec<String>> {
         let st = self.state.lock().unwrap();
-        let mut keys: Vec<String> = st.attachments.values().flat_map(|(_, _, a)| std::iter::once(a.blob_key.clone()).chain(a.thumb_key.clone())).collect();
+        let mut keys: Vec<String> = st.attachments.values().flat_map(|(_, _, a)| std::iter::once(a.file.key().to_string()).chain(a.preview.as_ref().map(|p| p.key().to_string()))).collect();
         keys.sort();
         keys.dedup();
         Ok(keys)

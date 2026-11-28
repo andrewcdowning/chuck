@@ -9,6 +9,7 @@ use chuck_core::domain::order;
 use chuck_core::domain::schedule::{self, ScheduleInput};
 use chuck_core::domain::search;
 use crate::ids;
+use crate::blob::BlobRef;
 use crate::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
 use crate::store::*;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -57,7 +58,7 @@ fn to_note(r: NoteRecord) -> Note {
         repeat: r.schedule.repeat,
         reminder_done: r.schedule.reminder_done,
         due_at: r.schedule.due_at,
-        attachments: r.attachments,
+        attachments: r.attachments.iter().map(|a| a.public()).collect(),
     }
 }
 
@@ -211,28 +212,31 @@ impl<'a, R: NoteRecords> NoteService<'a, R> {
             }
             let att = tx.insert_attachment(owner, &ids::new_id(), note_id, a, t)?;
             tx.touch_note(owner, note_id, t)?;
-            Ok(att)
+            Ok(att.public())
         })
     }
 
     pub fn attachment(&self, owner: &str, id: &str) -> Result<Attachment> {
         known(id)?;
-        self.records.transact(|tx| tx.get_attachment(owner, id)?.ok_or(StoreError::NotFound))
+        self.records.transact(|tx| tx.get_attachment(owner, id)?.map(|a| a.public()).ok_or(StoreError::NotFound))
     }
 
-    /// Returns the key of the preview this replaced, if it was a different one.
-    pub fn set_attachment_thumb(&self, owner: &str, id: &str, thumb_key: &str) -> Result<Option<String>> {
+    pub fn attachment_files(&self, owner: &str, id: &str) -> Result<AttachmentFiles> {
         known(id)?;
-        self.records.transact(|tx| Ok(tx.set_thumb(owner, id, thumb_key)?.filter(|k| k != thumb_key)))
+        self.records.transact(|tx| {
+            let a = tx.get_attachment(owner, id)?.ok_or(StoreError::NotFound)?;
+            Ok(AttachmentFiles { file: a.file, preview: a.preview })
+        })
+    }
+
+    pub fn set_attachment_thumb(&self, owner: &str, id: &str, preview: &BlobRef) -> Result<()> {
+        known(id)?;
+        self.records.transact(|tx| tx.set_thumb(owner, id, preview))
     }
 
     pub fn delete_attachment(&self, owner: &str, id: &str) -> Result<Attachment> {
         known(id)?;
-        self.records.transact(|tx| tx.delete_attachment(owner, id)?.ok_or(StoreError::NotFound))
-    }
-
-    pub fn blob_referenced(&self, owner: &str, key: &str) -> Result<bool> {
-        self.records.transact(|tx| tx.blob_referenced(owner, key))
+        self.records.transact(|tx| tx.delete_attachment(owner, id)?.map(|a| a.public()).ok_or(StoreError::NotFound))
     }
 }
 
@@ -286,14 +290,14 @@ macro_rules! note_service_methods {
         fn attachment(&self, owner: &str, id: &str) -> $crate::store::Result<$crate::store::Attachment> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).attachment(owner, id)
         }
-        fn set_attachment_thumb(&self, owner: &str, id: &str, thumb_key: &str) -> $crate::store::Result<Option<String>> {
-            $crate::service::NoteService::new($crate::service::HasRecords::records(self)).set_attachment_thumb(owner, id, thumb_key)
+        fn attachment_files(&self, owner: &str, id: &str) -> $crate::store::Result<$crate::store::AttachmentFiles> {
+            $crate::service::NoteService::new($crate::service::HasRecords::records(self)).attachment_files(owner, id)
+        }
+        fn set_attachment_thumb(&self, owner: &str, id: &str, preview: &$crate::blob::BlobRef) -> $crate::store::Result<()> {
+            $crate::service::NoteService::new($crate::service::HasRecords::records(self)).set_attachment_thumb(owner, id, preview)
         }
         fn delete_attachment(&self, owner: &str, id: &str) -> $crate::store::Result<$crate::store::Attachment> {
             $crate::service::NoteService::new($crate::service::HasRecords::records(self)).delete_attachment(owner, id)
-        }
-        fn blob_referenced(&self, owner: &str, key: &str) -> $crate::store::Result<bool> {
-            $crate::service::NoteService::new($crate::service::HasRecords::records(self)).blob_referenced(owner, key)
         }
     };
 }

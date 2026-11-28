@@ -1,7 +1,8 @@
 use chuck_control::{AccountRecords, OwnerRecords, Usage};
 use chuck_core::domain::order::Slot;
 use chuck_core::domain::schedule::Schedule;
-use chuck_data::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
+use chuck_data::blob::BlobRef;
+use chuck_data::records::{AttachmentRecord, NoteRecord, NoteRecords, RecordQuery, RecordTx};
 use chuck_data::store::*;
 use chuck_data::tagmodel::{FeedbackCount, HasTagModel, ModelCache, TagModelService, TagSource};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -335,12 +336,12 @@ impl SqliteStore {
 
 }
 
-const ATTACHMENT_COLS: &str = "id, note_id, mime, bytes, width, height, name, blob_key, thumb_key, duration_ms";
+const ATTACHMENT_COLS: &str = "id, note_id, mime, bytes, width, height, name, blob_key, thumb_key, duration_ms, sha256";
 
-fn attachment_row(r: &rusqlite::Row) -> rusqlite::Result<Attachment> {
-    let thumb_key: Option<String> = r.get(8)?;
+fn attachment_row(r: &rusqlite::Row) -> rusqlite::Result<AttachmentRecord> {
     let blob_key: String = r.get(7)?;
-    Ok(Attachment {
+    let thumb_key: Option<String> = r.get(8)?;
+    Ok(AttachmentRecord {
         id: r.get(0)?,
         note_id: r.get(1)?,
         mime: r.get(2)?,
@@ -349,10 +350,9 @@ fn attachment_row(r: &rusqlite::Row) -> rusqlite::Result<Attachment> {
         height: r.get(5)?,
         duration_ms: r.get(9)?,
         name: r.get(6)?,
-        has_thumb: thumb_key.is_some(),
-        v: chuck_data::blob::attachment_version(&blob_key, thumb_key.as_deref()),
-        blob_key,
-        thumb_key,
+        sha256: r.get(10)?,
+        file: BlobRef::from_stored(blob_key),
+        preview: thumb_key.map(BlobRef::from_stored),
     })
 }
 
@@ -574,7 +574,7 @@ impl RecordTx for SqliteTx<'_> {
         Ok(self.tx.query_row("SELECT COUNT(*) FROM attachments WHERE note_id=?1 AND owner=?2", params![note_id, owner], |r| r.get(0))?)
     }
 
-    fn insert_attachment(&mut self, owner: &str, id: &str, note_id: &str, a: &NewAttachment, created_at: i64) -> Result<Attachment> {
+    fn insert_attachment(&mut self, owner: &str, id: &str, note_id: &str, a: &NewAttachment, created_at: i64) -> Result<AttachmentRecord> {
         if !self.owns(owner, note_id)? {
             return Err(StoreError::NotFound);
         }
@@ -586,35 +586,28 @@ impl RecordTx for SqliteTx<'_> {
         self.tx.execute(
             "INSERT INTO attachments(id, owner, note_id, position, blob_key, sha256, mime, bytes, width, height, name, created_at, duration_ms)
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![id, owner, note_id, next, a.blob_key, a.sha256, a.mime, a.bytes, a.width, a.height, a.name, created_at, a.duration_ms],
+            params![id, owner, note_id, next, a.file.key(), a.sha256, a.mime, a.bytes, a.width, a.height, a.name, created_at, a.duration_ms],
         )?;
         self.get_attachment(owner, id)?.ok_or(StoreError::NotFound)
     }
 
-    fn get_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>> {
+    fn get_attachment(&mut self, owner: &str, id: &str) -> Result<Option<AttachmentRecord>> {
         let sql = format!("SELECT {ATTACHMENT_COLS} FROM attachments WHERE id=?1 AND owner=?2");
         Ok(self.tx.query_row(&sql, params![id, owner], attachment_row).optional()?)
     }
 
-    fn set_thumb(&mut self, owner: &str, id: &str, thumb_key: &str) -> Result<Option<String>> {
-        let old = self.get_attachment(owner, id)?.ok_or(StoreError::NotFound)?.thumb_key;
-        self.tx.execute("UPDATE attachments SET thumb_key=?1 WHERE id=?2 AND owner=?3", params![thumb_key, id, owner])?;
-        Ok(old)
+    fn set_thumb(&mut self, owner: &str, id: &str, preview: &BlobRef) -> Result<()> {
+        if self.get_attachment(owner, id)?.is_none() {
+            return Err(StoreError::NotFound);
+        }
+        self.tx.execute("UPDATE attachments SET thumb_key=?1 WHERE id=?2 AND owner=?3", params![preview.key(), id, owner])?;
+        Ok(())
     }
 
-    fn delete_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>> {
+    fn delete_attachment(&mut self, owner: &str, id: &str) -> Result<Option<AttachmentRecord>> {
         let Some(a) = self.get_attachment(owner, id)? else { return Ok(None) };
         self.tx.execute("DELETE FROM attachments WHERE id=?1 AND owner=?2", params![id, owner])?;
         Ok(Some(a))
-    }
-
-    fn blob_referenced(&mut self, owner: &str, key: &str) -> Result<bool> {
-        let n: i64 = self.tx.query_row(
-            "SELECT COUNT(*) FROM attachments WHERE owner=?1 AND (blob_key=?2 OR thumb_key=?2)",
-            params![owner, key],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
     }
 }
 

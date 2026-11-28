@@ -1,8 +1,28 @@
 //! The data plane's storage interface as the HTTP layer sees it: cards, tags, rules, attachments and tag suggestions.
 //! The plain types live in `chuck_core::model` and are re-exported here, so `store::Note` and friends keep working.
 
+use crate::blob::BlobRef;
 pub use chuck_core::model::*;
 pub use chuck_core::tagging::SuggestionSet;
+
+/// What the data plane records about a new attachment: its details, and where its bytes were stored (by the media service,
+/// before the record is made).
+pub struct NewAttachment {
+    pub mime: String,
+    pub bytes: i64,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub name: Option<String>,
+    pub sha256: String,
+    pub file: BlobRef,
+}
+
+/// Where an attachment's bytes are. Only the media service asks for this.
+pub struct AttachmentFiles {
+    pub file: BlobRef,
+    pub preview: Option<BlobRef>,
+}
 
 /// Synchronous on purpose: callers run it inside `spawn_blocking`.
 /// A network-backed store can use its own runtime handle internally.
@@ -30,13 +50,14 @@ pub trait NoteStore: Send + Sync + 'static {
 
     /// Attaches a stored file to one of the owner's notes. NotFound if the note is not theirs.
     fn add_attachment(&self, owner: &str, note_id: &str, a: &NewAttachment) -> Result<Attachment>;
+    /// What clients see of an attachment.
     fn attachment(&self, owner: &str, id: &str) -> Result<Attachment>;
-    /// Sets the preview image. Returns the key of the preview it replaced, if any, so the caller can clean it up.
-    fn set_attachment_thumb(&self, owner: &str, id: &str, thumb_key: &str) -> Result<Option<String>>;
-    /// Removes an attachment and returns it, so the caller can clean up its files.
+    /// Where an attachment's bytes are kept. For the media service.
+    fn attachment_files(&self, owner: &str, id: &str) -> Result<AttachmentFiles>;
+    /// Sets the preview image. The preview it replaces is no longer used by anything and is left to the sweeper.
+    fn set_attachment_thumb(&self, owner: &str, id: &str, preview: &BlobRef) -> Result<()>;
+    /// Removes an attachment and returns it. Its files are left to the sweeper once nothing uses them.
     fn delete_attachment(&self, owner: &str, id: &str) -> Result<Attachment>;
-    /// True if any of the owner's attachments still uses this storage key (as a file or a preview).
-    fn blob_referenced(&self, owner: &str, key: &str) -> Result<bool>;
 
     /// The owner's accepted and dismissed tag suggestions, oldest first (part of their own data export).
     fn feedback_events(&self, owner: &str) -> Result<Vec<FeedbackEvent>>;

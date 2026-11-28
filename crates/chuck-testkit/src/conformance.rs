@@ -10,7 +10,7 @@
 //! here and not listed there. Backend-specific checks (migrations, file formats) stay with the backend.
 
 use chuck_core::model::Identity;
-use chuck_data::blob::{BlobStore, MemBlobStore};
+use chuck_data::blob::{BlobRef, BlobStore, MemBlobStore};
 use chuck_control::{AccountRecords, AccountService, AccountStatus, OwnerPurger, OwnerRecords, Role, Store};
 use chuck_data::store::*;
 use std::sync::Arc;
@@ -204,8 +204,8 @@ pub fn attachments_are_owned_ordered_and_cascade(make: &Make) {
         height: Some(480),
         duration_ms: None,
         name: Some("a.jpg".into()),
-        blob_key: key.into(),
         sha256: "x".into(),
+        file: BlobRef::from_stored(key),
     };
     let a1 = s.add_attachment("alice", &n.id, &new("k1")).unwrap();
     let a2 = s.add_attachment("alice", &n.id, &new("k2")).unwrap();
@@ -219,24 +219,25 @@ pub fn attachments_are_owned_ordered_and_cascade(make: &Make) {
     // another user can neither attach to, read, change nor delete alice's attachments
     assert!(matches!(s.add_attachment("bob", &n.id, &new("kb")), Err(StoreError::NotFound)));
     assert!(matches!(s.attachment("bob", &a1.id), Err(StoreError::NotFound)));
-    assert!(matches!(s.set_attachment_thumb("bob", &a1.id, "t"), Err(StoreError::NotFound)));
+    assert!(matches!(s.set_attachment_thumb("bob", &a1.id, &BlobRef::from_stored("t")), Err(StoreError::NotFound)));
     assert!(matches!(s.delete_attachment("bob", &a1.id), Err(StoreError::NotFound)));
-    assert!(!s.blob_referenced("bob", "k1").unwrap());
+    assert!(!referenced(&s, "bob", "k1"));
     assert!(s.get("bob", &other.id).unwrap().attachments.is_empty());
 
     // previews
-    assert_eq!(s.set_attachment_thumb("alice", &a1.id, "t1").unwrap(), None);
-    assert_eq!(s.set_attachment_thumb("alice", &a1.id, "t2").unwrap(), Some("t1".to_string()));
+    s.set_attachment_thumb("alice", &a1.id, &BlobRef::from_stored("t1")).unwrap();
+    assert!(referenced(&s, "alice", "t1"));
+    s.set_attachment_thumb("alice", &a1.id, &BlobRef::from_stored("t2")).unwrap();
     assert!(s.attachment("alice", &a1.id).unwrap().has_thumb);
-    assert!(s.blob_referenced("alice", "t2").unwrap() && !s.blob_referenced("alice", "t1").unwrap());
+    assert!(referenced(&s, "alice", "t2") && !referenced(&s, "alice", "t1"));
 
     // delete one, then the note: the rest cascade
     let gone = s.delete_attachment("alice", &a2.id).unwrap();
-    assert_eq!(gone.blob_key, "k2");
-    assert!(!s.blob_referenced("alice", "k2").unwrap());
+    assert_eq!(gone.id, a2.id);
+    assert!(!referenced(&s, "alice", "k2"));
     s.delete("alice", &n.id).unwrap();
     assert!(matches!(s.attachment("alice", &a1.id), Err(StoreError::NotFound)));
-    assert!(!s.blob_referenced("alice", "k1").unwrap());
+    assert!(!referenced(&s, "alice", "k1"));
 }
 
 pub fn manual_order_within_groups(make: &Make) {
@@ -341,9 +342,9 @@ pub fn account_lifecycle(make: &Make) {
     for k in ["alice/f1", "alice/t1", "bob/f1"] {
         blobs.put(k, b"x").unwrap();
     }
-    let new = |k: &str| NewAttachment { mime: "image/jpeg".into(), bytes: 100, width: Some(1), height: Some(1), duration_ms: None, name: None, blob_key: k.into(), sha256: "x".into() };
+    let new = |k: &str| NewAttachment { mime: "image/jpeg".into(), bytes: 100, width: Some(1), height: Some(1), duration_ms: None, name: None, sha256: "x".into(), file: BlobRef::from_stored(k) };
     let a = s.add_attachment("alice", &mine.id, &new("alice/f1")).unwrap();
-    s.set_attachment_thumb("alice", &a.id, "alice/t1").unwrap();
+    s.set_attachment_thumb("alice", &a.id, &BlobRef::from_stored("alice/t1")).unwrap();
     s.add_attachment("bob", &bobs.id, &new("bob/f1")).unwrap();
     let summary = accounts.summaries().unwrap();
     let alice = summary.iter().find(|u| u.user.id == "alice").unwrap();
@@ -357,11 +358,16 @@ pub fn account_lifecycle(make: &Make) {
     assert!(matches!(s.attachment("alice", &a.id), Err(StoreError::NotFound)));
     assert_eq!(accounts.summaries().unwrap().len(), 1);
     assert_eq!(s.list("bob", &NoteQuery::default()).unwrap().len(), 1, "bob untouched");
-    assert!(s.blob_referenced("bob", "bob/f1").unwrap());
+    assert!(referenced(&s, "bob", "bob/f1"));
     assert!(matches!(accounts.delete("alice"), Err(StoreError::NotFound)));
     // signing in again starts a fresh account
     assert_eq!(accounts.resolve(&ident("alice", None)).unwrap().status, AccountStatus::Active);
     assert!(s.list("alice", &NoteQuery::default()).unwrap().is_empty());
+}
+
+/// Whether any of the owner's attachments uses this stored file, as the original or as the preview.
+fn referenced(s: &Arc<dyn Store>, owner: &str, key: &str) -> bool {
+    s.blob_keys(owner).unwrap().iter().any(|k| k == key)
 }
 
 fn accounts_for(s: &Arc<dyn Store>, admins: impl IntoIterator<Item = impl Into<String>>) -> (AccountService, Arc<MemBlobStore>) {
@@ -447,7 +453,7 @@ pub fn paging(make: &Make) {
 }
 
 fn new_attachment(key: &str) -> NewAttachment {
-    NewAttachment { mime: "image/jpeg".into(), bytes: 10, width: Some(1), height: Some(1), duration_ms: None, name: None, blob_key: key.into(), sha256: "x".into() }
+    NewAttachment { mime: "image/jpeg".into(), bytes: 10, width: Some(1), height: Some(1), duration_ms: None, name: None, sha256: "x".into(), file: BlobRef::from_stored(key) }
 }
 
 /// Card kind comes from content: reminder beats todo beats media beats note.
@@ -479,7 +485,7 @@ pub fn attachment_cap(make: &Make) {
         s.add_attachment("me", &n.id, &new_attachment(&format!("k{i}"))).unwrap();
     }
     assert!(matches!(s.add_attachment("me", &n.id, &new_attachment("over")), Err(StoreError::Invalid(_))));
-    assert!(!s.blob_referenced("me", "over").unwrap());
+    assert!(!referenced(&s, "me", "over"));
     s.delete_attachment("me", &first.id).unwrap();
     s.add_attachment("me", &n.id, &new_attachment("again")).unwrap();
     let other = s.create("me", &NoteInput { body: "other card".into(), ..Default::default() }).unwrap();
@@ -548,7 +554,7 @@ pub fn ids_are_opaque_and_never_reused(make: &Make) {
         nf(s.move_note("me", &a.id, Some(bad), None).map(|_| ()), "move next to");
         nf(s.add_attachment("me", bad, &new_attachment("kx")).map(|_| ()), "attach");
         nf(s.attachment("me", bad).map(|_| ()), "attachment");
-        nf(s.set_attachment_thumb("me", bad, "t").map(|_| ()), "preview");
+        nf(s.set_attachment_thumb("me", bad, &BlobRef::from_stored("t")).map(|_| ()), "preview");
         nf(s.delete_attachment("me", bad).map(|_| ()), "delete attachment");
         nf(s.delete_rule("me", bad), "delete rule");
     }

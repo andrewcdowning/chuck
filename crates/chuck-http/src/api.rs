@@ -1,9 +1,10 @@
 use crate::auth::Authenticator;
 use chuck_mgmt::{AdminError, AdminService};
-use chuck_data::blob::{self, BlobStore};
+use chuck_data::blob::BlobStore;
+use chuck_data::media::{MediaFailure, MediaService};
 use chuck_control::{AccountRecords, AccountService, AccountStatus, OwnerPurger, OwnerRecords, Principal, Store, DEFAULT_ACCOUNT_CACHE};
 use chuck_core::media::{self, MediaError};
-use chuck_data::store::{normalize_tag, NewAttachment, NoteInput, NoteQuery, RuleInput, StoreError};
+use chuck_data::store::{normalize_tag, NoteInput, NoteQuery, RuleInput, StoreError};
 use chuck_core::domain::input::{self, clean_name, InputError, MAX_BODY};
 use serde::Deserialize;
 use axum::{
@@ -375,6 +376,18 @@ async fn export(State(s): State<AppState>, Authed(p): Authed, Query(mut q): Quer
 
 // ---------------------------------------------------------------- media
 
+impl From<MediaFailure> for ApiError {
+    fn from(e: MediaFailure) -> Self {
+        match e {
+            MediaFailure::Rejected(e) => e.into(),
+            MediaFailure::InvalidDuration => ApiError(StatusCode::BAD_REQUEST, "invalid duration".into()),
+            MediaFailure::PreviewTooLarge => ApiError(StatusCode::BAD_REQUEST, "preview must be at most 1024 pixels on each side".into()),
+            MediaFailure::FileMissing => ApiError(StatusCode::NOT_FOUND, "file missing".into()),
+            MediaFailure::Store(e) => e.into(),
+        }
+    }
+}
+
 impl From<MediaError> for ApiError {
     fn from(e: MediaError) -> Self {
         let code = match e {
@@ -399,35 +412,9 @@ struct AttachQuery {
 async fn add_attachment(State(s): State<AppState>, Authed(p): Authed, Path(note_id): Path<String>, Query(q): Query<AttachQuery>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
-    let name = clean_name(q.name);
-    let res = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
-        // Fail early, before any work, if the card is not this user's.
-        st.get(&o, &note_id)?;
-        let c = media::check_upload(&body)?;
-        let duration_ms = match q.duration_ms {
-            Some(_) if !c.audio => None, // ignored for images
-            Some(d) if !(0..=6 * 3600 * 1000).contains(&d) => return Err(ApiError(StatusCode::BAD_REQUEST, "invalid duration".into())),
-            d => d,
-        };
-        let key = blob::key_for(&o, &c.bytes);
-        blobs.put(&key, &c.bytes).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("storing file: {e}")))?;
-        let new = NewAttachment {
-            mime: c.mime.to_string(),
-            bytes: c.bytes.len() as i64,
-            width: c.width.map(|w| w as i64),
-            height: c.height.map(|h| h as i64),
-            duration_ms,
-            name,
-            sha256: blob::sha256_hex(&c.bytes),
-            blob_key: key.clone(),
-        };
-        match st.add_attachment(&o, &note_id, &new) {
-            Ok(a) => Ok(a),
-            Err(e) => Err(e.into()), // the stored file is deleted by the sweeper if nothing else uses it
-        }
-    })
-    .await
-    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    let res = tokio::task::spawn_blocking(move || MediaService::new(&*st, &*blobs).add(&o, &note_id, &body, q.name, q.duration_ms))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     Ok((StatusCode::CREATED, Json(res)))
 }
 
@@ -435,19 +422,9 @@ async fn add_attachment(State(s): State<AppState>, Authed(p): Authed, Path(note_
 async fn put_thumb(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<String>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
-    tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
-        st.attachment(&o, &id)?;
-        let c = media::check_image(&body, media::MAX_THUMB_BYTES)?;
-        if c.width > 1024 || c.height > 1024 {
-            return Err(ApiError(StatusCode::BAD_REQUEST, "preview must be at most 1024 pixels on each side".into()));
-        }
-        let key = blob::key_for(&o, &c.bytes);
-        blobs.put(&key, &c.bytes).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("storing file: {e}")))?;
-        st.set_attachment_thumb(&o, &id, &key)?; // the replaced preview is deleted by the sweeper
-        Ok(())
-    })
-    .await
-    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    tokio::task::spawn_blocking(move || MediaService::new(&*st, &*blobs).set_preview(&o, &id, &body))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -464,17 +441,11 @@ async fn get_media(State(s): State<AppState>, Authed(p): Authed, h: HeaderMap, P
     let if_none_match = h.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_string);
     let wanted_v = q.v.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
-    let (a, bytes, is_thumb) = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
-        let a = st.attachment(&o, &id)?;
-        let (key, is_thumb) = match (&a.thumb_key, q.thumb.unwrap_or(false)) {
-            (Some(t), true) => (t.clone(), true),
-            _ => (a.blob_key.clone(), false),
-        };
-        let bytes = blobs.get(&key).map_err(|_| ApiError(StatusCode::NOT_FOUND, "file missing".into()))?;
-        Ok((a, bytes, is_thumb))
-    })
-    .await
-    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    let want_preview = q.thumb.unwrap_or(false);
+    let file = tokio::task::spawn_blocking(move || MediaService::new(&*st, &*blobs).read(&o, &id, want_preview))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    let (a, bytes, is_thumb) = (file.attachment, file.bytes, file.preview);
     let etag = format!("\"{}{}\"", a.v, if is_thumb { "-t" } else { "" });
     // Long caching only when the URL names the current version; anything else must be checked with the server, so a
     // reused id can never show an old picture.
@@ -520,8 +491,8 @@ async fn get_media(State(s): State<AppState>, Authed(p): Authed, h: HeaderMap, P
 
 async fn delete_media(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<String>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
-    let st = s.store.clone();
-    blocking(move || st.delete_attachment(&o, &id).map(|_| ())).await?;
+    let (st, blobs) = (s.store.clone(), s.blobs.clone());
+    blocking(move || MediaService::new(&*st, &*blobs).delete(&o, &id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -621,7 +592,10 @@ async fn export_me(State(s): State<AppState>, Authed(p): Authed) -> Result<impl 
         z.add("rules.json", &pretty(&st.rules(&o)?), now).map_err(zerr)?;
         z.add("suggestion-feedback.json", &pretty(&st.feedback_events(&o)?), now).map_err(zerr)?;
         for a in notes.iter().flat_map(|n| n.attachments.iter()) {
-            let bytes = blobs.get(&a.blob_key).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("reading file {}: {e}", a.id)))?;
+            let bytes = MediaService::new(&*st, &*blobs).read(&o, &a.id, false).map_err(|e| match e {
+                MediaFailure::FileMissing => ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("reading file {}: it is missing", a.id)),
+                other => other.into(),
+            })?.bytes;
             let name = clean_name(a.name.clone()).unwrap_or_else(|| "file".into());
             z.add(&format!("attachments/{}-{}", a.id, name.replace('/', "_")), &bytes, now).map_err(zerr)?;
         }

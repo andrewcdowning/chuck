@@ -11,6 +11,7 @@
 
 use chuck_core::domain::order::Slot;
 use chuck_core::domain::schedule::Schedule;
+use crate::blob::BlobRef;
 use crate::store::{Attachment, NewAttachment, Result, Rule, TagCount};
 
 /// A card as stored. `open_todos` and `position` are what ordering needs; the service computes and maintains them.
@@ -29,7 +30,48 @@ pub struct NoteRecord {
     /// Sorted by name.
     pub tags: Vec<String>,
     /// In display order.
-    pub attachments: Vec<Attachment>,
+    pub attachments: Vec<AttachmentRecord>,
+}
+
+/// An attachment as stored: what clients see, plus where the bytes are.
+#[derive(Debug, Clone)]
+pub struct AttachmentRecord {
+    pub id: String,
+    pub note_id: String,
+    pub mime: String,
+    pub bytes: i64,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub name: Option<String>,
+    /// Hash of the file's bytes.
+    pub sha256: String,
+    pub file: BlobRef,
+    pub preview: Option<BlobRef>,
+}
+
+impl AttachmentRecord {
+    /// Changes whenever the file or its preview changes (see `Attachment::v`). Derived from the names, which include the
+    /// owner and a hash of the content, so two users' files never share a version.
+    pub fn version(&self) -> String {
+        crate::blob::attachment_version(self.file.key(), self.preview.as_ref().map(BlobRef::key))
+    }
+
+    /// What clients see.
+    pub fn public(&self) -> Attachment {
+        Attachment {
+            id: self.id.clone(),
+            note_id: self.note_id.clone(),
+            mime: self.mime.clone(),
+            bytes: self.bytes,
+            width: self.width,
+            height: self.height,
+            duration_ms: self.duration_ms,
+            name: self.name.clone(),
+            has_thumb: self.preview.is_some(),
+            v: self.version(),
+        }
+    }
 }
 
 /// Which cards to return, already normalised by the service.
@@ -87,13 +129,11 @@ pub trait RecordTx {
 
     fn count_attachments(&mut self, owner: &str, note_id: &str) -> Result<i64>;
     /// Appends to the card's attachments (display order is insertion order). The card must be the owner's.
-    fn insert_attachment(&mut self, owner: &str, id: &str, note_id: &str, a: &NewAttachment, created_at: i64) -> Result<Attachment>;
-    fn get_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>>;
-    /// Sets the preview key and returns the previous one. NotFound if the attachment is not the owner's.
-    fn set_thumb(&mut self, owner: &str, id: &str, thumb_key: &str) -> Result<Option<String>>;
-    fn delete_attachment(&mut self, owner: &str, id: &str) -> Result<Option<Attachment>>;
-    /// True if any of the owner's attachments uses this storage key as a file or a preview.
-    fn blob_referenced(&mut self, owner: &str, key: &str) -> Result<bool>;
+    fn insert_attachment(&mut self, owner: &str, id: &str, note_id: &str, a: &NewAttachment, created_at: i64) -> Result<AttachmentRecord>;
+    fn get_attachment(&mut self, owner: &str, id: &str) -> Result<Option<AttachmentRecord>>;
+    /// Sets the preview. NotFound if the attachment is not the owner's.
+    fn set_thumb(&mut self, owner: &str, id: &str, preview: &BlobRef) -> Result<()>;
+    fn delete_attachment(&mut self, owner: &str, id: &str) -> Result<Option<AttachmentRecord>>;
 }
 
 pub trait NoteRecords: Send + Sync + 'static {

@@ -8,6 +8,27 @@ use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Names a stored file: what the `BlobStore` is asked for. Only the media service, the record stores and the sweeper make or
+/// read these; the types clients see never carry one, so how files are addressed can change without touching them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BlobRef(String);
+
+impl BlobRef {
+    /// The name for these bytes owned by this user: the same bytes from the same user are one file.
+    pub fn for_content(owner: &str, bytes: &[u8]) -> Self {
+        BlobRef(key_for(owner, bytes))
+    }
+
+    /// A name read back from a record or listing.
+    pub fn from_stored(key: impl Into<String>) -> Self {
+        BlobRef(key.into())
+    }
+
+    pub fn key(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A stored file, as listed for maintenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobInfo {
