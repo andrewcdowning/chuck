@@ -678,6 +678,46 @@ impl NoteStore for SqliteStore {
 
 #[cfg(test)]
 mod tests {
+    /// The conflict classification works on the text SQLite gives. Pin it against real errors, so a change in the library's
+    /// wording makes this fail instead of turning conflicts back into 500s.
+    #[test]
+    fn real_constraint_errors_are_conflicts_and_real_faults_are_not() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE parent(id INTEGER PRIMARY KEY);
+             CREATE TABLE child(id INTEGER PRIMARY KEY, parent INTEGER NOT NULL REFERENCES parent(id), kind TEXT CHECK(kind IN ('a','b')));
+             CREATE TABLE named(name TEXT PRIMARY KEY, other TEXT UNIQUE);
+             INSERT INTO parent VALUES(1);
+             INSERT INTO named VALUES('x', 'y');",
+        )
+        .unwrap();
+        let err = |sql: &str| StoreError::from(c.execute_batch(sql).unwrap_err());
+        assert!(matches!(err("INSERT INTO named VALUES('x', 'z');"), StoreError::Conflict(_)), "text primary key");
+        assert!(matches!(err("INSERT INTO named VALUES('w', 'y');"), StoreError::Conflict(_)), "unique column");
+        assert!(matches!(err("INSERT INTO parent VALUES(1);"), StoreError::Conflict(_)), "integer primary key");
+        assert!(matches!(err("INSERT INTO child(parent) VALUES(99);"), StoreError::Conflict(_)), "foreign key");
+        assert!(matches!(err("INSERT INTO child(parent, kind) VALUES(1, 'zzz');"), StoreError::Other(_)), "a check violation is a bug, not a conflict");
+        assert!(matches!(err("INSERT INTO child(kind) VALUES('a');"), StoreError::Other(_)), "not null likewise");
+        assert!(matches!(err("SELECT * FROM missing;"), StoreError::Other(_)));
+    }
+
+    #[test]
+    fn a_locked_or_failing_database_is_not_a_conflict() {
+        let path = std::env::temp_dir().join(format!("chuck-locked-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let a = Connection::open(&path).unwrap();
+        a.execute_batch("CREATE TABLE t(x); BEGIN IMMEDIATE;").unwrap(); // holds the write lock
+        let b = Connection::open(&path).unwrap();
+        b.busy_timeout(std::time::Duration::from_millis(0)).unwrap();
+        let locked = StoreError::from(b.execute_batch("INSERT INTO t VALUES(1);").unwrap_err());
+        assert!(matches!(locked, StoreError::Other(_)), "{locked:?}");
+        let io = StoreError::from(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR), None));
+        assert!(matches!(io, StoreError::Other(_)), "{io:?}");
+        drop((a, b));
+        let _ = std::fs::remove_file(&path);
+    }
+
     use super::*;
 
     #[test]

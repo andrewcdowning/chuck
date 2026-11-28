@@ -129,6 +129,16 @@
                             }
                         }
                     },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
+                                }
+                            }
+                        }
+                    },
                     "500": {
                         "description": "InternalError 500 response",
                         "content": {
@@ -308,6 +318,16 @@
                             }
                         }
                     },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
+                                }
+                            }
+                        }
+                    },
                     "413": {
                         "description": "TooLarge 413 response",
                         "content": {
@@ -481,6 +501,16 @@
                             }
                         }
                     },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
+                                }
+                            }
+                        }
+                    },
                     "500": {
                         "description": "InternalError 500 response",
                         "content": {
@@ -527,6 +557,16 @@
                             "application/json": {
                                 "schema": {
                                     "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
                                 }
                             }
                         }
@@ -602,6 +642,16 @@
                             "application/json": {
                                 "schema": {
                                     "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
                                 }
                             }
                         }
@@ -702,6 +752,16 @@
                             }
                         }
                     },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
+                                }
+                            }
+                        }
+                    },
                     "413": {
                         "description": "TooLarge 413 response",
                         "content": {
@@ -785,6 +845,16 @@
                             "application/json": {
                                 "schema": {
                                     "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
                                 }
                             }
                         }
@@ -881,6 +951,16 @@
                             }
                         }
                     },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
+                                }
+                            }
+                        }
+                    },
                     "500": {
                         "description": "InternalError 500 response",
                         "content": {
@@ -915,6 +995,16 @@
                             "application/json": {
                                 "schema": {
                                     "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
                                 }
                             }
                         }
@@ -965,6 +1055,16 @@
                             "application/json": {
                                 "schema": {
                                     "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
                                 }
                             }
                         }
@@ -1063,6 +1163,16 @@
                             "application/json": {
                                 "schema": {
                                     "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict 409 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ConflictResponseContent"
                                 }
                             }
                         }
@@ -1216,6 +1326,18 @@
                     "todo",
                     "reminder",
                     "media"
+                ]
+            },
+            "ConflictResponseContent": {
+                "type": "object",
+                "description": "The data changed meanwhile (for example the card was removed while saving), or the account is in a state that forbids the\naction. Look again and retry.",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
                 ]
             },
             "ExportNotesOutputPayload": {

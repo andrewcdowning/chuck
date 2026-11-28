@@ -77,7 +77,7 @@ operation SetUserStatus {
         @required
         user: User
     }
-    errors: [BadRequest, Unauthorized, Forbidden, NotFound, InternalError]
+    errors: [BadRequest, Unauthorized, Forbidden, NotFound, Conflict, InternalError]
 }
 
 /// Deletes another account and everything it owns. To keep someone out without deleting, disable the account.
@@ -89,7 +89,7 @@ operation DeleteUser {
         id: String
     }
     output := {}
-    errors: [BadRequest, Unauthorized, Forbidden, NotFound, InternalError]
+    errors: [BadRequest, Unauthorized, Forbidden, NotFound, Conflict, InternalError]
 }
 
 /// Deletes stored files that no card refers to and that have not been written for ten minutes (files of deleted cards and

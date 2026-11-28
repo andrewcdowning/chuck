@@ -25,6 +25,13 @@ between planes, so clients are unaffected by the split.
 - **Authentication** is not in the model. It is chosen per deployment (see [AUTH.md](AUTH.md)), so the documents have no
   security scheme; add one for your gateway when you publish them.
 
+## Errors
+
+Error bodies are always `{"error": "<message>"}`. 400 means the request itself is wrong, 401 and 403 are about who you are,
+404 means the thing is not yours or does not exist, 409 (`Conflict`) means the data changed while saving or the account is
+in a state that forbids the action (for example being deleted), so look again and retry, 413 means too large, and 500 is a
+fault of the server that is logged and not described.
+
 ## Known gaps in the model
 
 List endpoints return objects (`{"notes": [...]}`, `{"tags": [...]}`, `{"rules": [...]}`, `{"users": [...]}`) because Smithy cannot bind a bare array to a body.

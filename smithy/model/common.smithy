@@ -33,6 +33,15 @@ structure NotFound {
     error: String
 }
 
+/// The data changed meanwhile (for example the card was removed while saving), or the account is in a state that forbids the
+/// action. Look again and retry.
+@error("client")
+@httpError(409)
+structure Conflict {
+    @required
+    error: String
+}
+
 @error("client")
 @httpError(413)
 structure TooLarge {

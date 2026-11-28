@@ -236,7 +236,7 @@ operation CreateNote {
         @required
         note: Note
     }
-    errors: [BadRequest, Unauthorized, InternalError]
+    errors: [BadRequest, Unauthorized, Conflict, InternalError]
 }
 
 @idempotent
@@ -256,7 +256,7 @@ operation UpdateNote {
         @required
         note: Note
     }
-    errors: [BadRequest, Unauthorized, NotFound, InternalError]
+    errors: [BadRequest, Unauthorized, NotFound, Conflict, InternalError]
 }
 
 @idempotent
@@ -268,7 +268,7 @@ operation DeleteNote {
         id: NoteId
     }
     output := {}
-    errors: [Unauthorized, NotFound, InternalError]
+    errors: [Unauthorized, NotFound, Conflict, InternalError]
 }
 
 /// Puts a card between two neighbours. At least one of prev and next is required. Open todos stay above other cards.
@@ -290,7 +290,7 @@ operation MoveNote {
         @required
         note: Note
     }
-    errors: [BadRequest, Unauthorized, NotFound, InternalError]
+    errors: [BadRequest, Unauthorized, NotFound, Conflict, InternalError]
 }
 
 /// All matching notes as one Markdown file, oldest first. Takes the same filters as ListNotes; paging is ignored.
@@ -386,7 +386,7 @@ operation SuggestionFeedback {
         confidence: Double
     }
     output := {}
-    errors: [BadRequest, Unauthorized, InternalError]
+    errors: [BadRequest, Unauthorized, Conflict, InternalError]
 }
 
 @readonly
@@ -413,7 +413,7 @@ operation AddRule {
         @required
         rule: Rule
     }
-    errors: [BadRequest, Unauthorized, InternalError]
+    errors: [BadRequest, Unauthorized, Conflict, InternalError]
 }
 
 @idempotent
@@ -425,7 +425,7 @@ operation DeleteRule {
         id: RuleId
     }
     output := {}
-    errors: [Unauthorized, NotFound, InternalError]
+    errors: [Unauthorized, NotFound, Conflict, InternalError]
 }
 
 /// Applies every rule to the caller's existing notes.
@@ -436,7 +436,7 @@ operation ApplyRules {
         @required
         changed: Integer
     }
-    errors: [Unauthorized, InternalError]
+    errors: [Unauthorized, Conflict, InternalError]
 }
 
 @mediaType("application/octet-stream")
@@ -472,7 +472,7 @@ operation AddAttachment {
         @required
         attachment: Attachment
     }
-    errors: [BadRequest, Unauthorized, NotFound, TooLarge, InternalError]
+    errors: [BadRequest, Unauthorized, NotFound, TooLarge, Conflict, InternalError]
 }
 
 /// Serves a file, or its preview with thumb=true. Supports Range (206) and conditional (304) requests. The response is
@@ -527,7 +527,7 @@ operation DeleteMedia {
         id: AttachmentId
     }
     output := {}
-    errors: [Unauthorized, NotFound, InternalError]
+    errors: [Unauthorized, NotFound, Conflict, InternalError]
 }
 
 /// The body is a small preview image (at most 1024 pixels on each side) made by the client.
@@ -544,5 +544,5 @@ operation PutThumb {
         image: FileBytes
     }
     output := {}
-    errors: [BadRequest, Unauthorized, NotFound, TooLarge, InternalError]
+    errors: [BadRequest, Unauthorized, NotFound, TooLarge, Conflict, InternalError]
 }
