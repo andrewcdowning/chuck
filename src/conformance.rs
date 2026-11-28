@@ -14,23 +14,34 @@ use crate::store::*;
 /// Makes a new, empty store for one case.
 pub type Make = dyn Fn() -> Box<dyn NoteStore>;
 
-/// Runs every case. Each case builds its own store through `make`.
-pub fn run_all(make: &Make) {
+/// The cards, tags, rules and attachments cases: what `NoteService` provides over any `NoteRecords` backend.
+pub fn run_notes(make: &Make) {
     crud_tags_and_isolation(make);
     reminders(make);
     todo_cards_pin_and_due(make);
     auto_tag_rules(make);
-    tag_suggestions_confidence_and_feedback(make);
     attachments_are_owned_ordered_and_cascade(make);
     manual_order_within_groups(make);
     many_moves_into_one_gap_renumber(make);
-    user_lifecycle(make);
     search_contract(make);
     update_semantics(make);
     paging(make);
     card_kinds(make);
     attachment_cap(make);
     ownership_is_checked_first(make);
+    rule_cap(make);
+}
+
+/// The cases for parts that are not yet behind the record traits: tag suggestions and accounts.
+pub fn run_extras(make: &Make) {
+    tag_suggestions_confidence_and_feedback(make);
+    user_lifecycle(make);
+}
+
+/// Runs every case. Each case builds its own store through `make`.
+pub fn run_all(make: &Make) {
+    run_notes(make);
+    run_extras(make);
 }
 
 pub fn crud_tags_and_isolation(make: &Make) {
@@ -463,4 +474,19 @@ pub fn ownership_is_checked_first(make: &Make) {
     nf(s.add_attachment("you", a, &new_attachment("k")).map(|_| ()), "attach");
     nf(s.get("me", 9_999_999).map(|_| ()), "a card that does not exist");
     assert_eq!(s.list("me", &NoteQuery::default()).unwrap().len(), 2);
+}
+
+/// A user may have at most `MAX_RULES` auto-tag rules. Going over is a client error (`Invalid`), and deleting one
+/// makes room.
+pub fn rule_cap(make: &Make) {
+    let s = make();
+    let first = s.add_rule("me", "k0", "t0").unwrap();
+    for i in 1..crate::service::MAX_RULES {
+        s.add_rule("me", &format!("k{i}"), "t").unwrap();
+    }
+    assert!(matches!(s.add_rule("me", "over", "t"), Err(StoreError::Invalid(_))));
+    assert_eq!(s.rules("me").unwrap().len(), crate::service::MAX_RULES);
+    s.add_rule("you", "mine", "t").unwrap();
+    s.delete_rule("me", first.id).unwrap();
+    s.add_rule("me", "again", "t").unwrap();
 }

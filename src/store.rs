@@ -122,7 +122,7 @@ pub struct FeedbackEvent {
     pub created_at: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Rule {
     pub id: i64,
     /// Keywords separated by `|` or `,`; the rule fires if any appears (case-insensitive substring).
