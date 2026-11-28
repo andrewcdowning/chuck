@@ -16,7 +16,7 @@ macro_rules! cases {
     };
 }
 
-cases!(crud_tags_and_isolation, reminders, todo_cards_pin_and_due, auto_tag_rules, tag_suggestions_confidence_and_feedback, attachments_are_owned_ordered_and_cascade, manual_order_within_groups, many_moves_into_one_gap_renumber, account_lifecycle, search_contract, update_semantics, paging, card_kinds, attachment_cap, ownership_is_checked_first, rule_cap);
+cases!(crud_tags_and_isolation, reminders, todo_cards_pin_and_due, auto_tag_rules, tag_suggestions_confidence_and_feedback, attachments_are_owned_ordered_and_cascade, manual_order_within_groups, many_moves_into_one_gap, account_lifecycle, search_contract, update_semantics, paging, card_kinds, attachment_cap, ownership_is_checked_first, rule_cap);
 
 #[test]
 fn every_conformance_case_is_listed() {

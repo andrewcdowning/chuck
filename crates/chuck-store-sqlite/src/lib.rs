@@ -22,7 +22,10 @@ pub type MigrationStep = fn(&Connection) -> Result<()>;
 /// The schema's history, in order. Step N takes a database from version N-1 to version N, which is recorded in SQLite's
 /// `user_version`. A released step is never edited: a schema change is a new step at the end. Each step runs in its own
 /// transaction together with the version bump, so a failure leaves the database at the previous version.
-pub const MIGRATIONS: &[(&str, MigrationStep)] = &[("baseline: the schema as it stood when versions were introduced", migrate_baseline)];
+pub const MIGRATIONS: &[(&str, MigrationStep)] = &[
+    ("baseline: the schema as it stood when versions were introduced", migrate_baseline),
+    ("card positions become sortable text, so moving a card never renumbers the others", migrate_text_positions),
+];
 
 /// Brings the database up to date. Refuses a database from a newer program instead of guessing.
 pub fn run_migrations(conn: &mut Connection, steps: &[(&str, MigrationStep)]) -> Result<()> {
@@ -39,6 +42,36 @@ pub fn run_migrations(conn: &mut Connection, steps: &[(&str, MigrationStep)]) ->
         tx.execute_batch(&format!("PRAGMA user_version = {}", i + 1))?;
         tx.commit()?;
     }
+    Ok(())
+}
+
+/// Step 2. Positions were numbers (REAL), with a renumbering pass when a gap ran out of precision. They become text that
+/// sorts in display order and always has room between two values. Every owner's cards keep exactly the order they had:
+/// the numbers are replaced by evenly spread text keys in the same order (highest first, ties by newest).
+fn migrate_text_positions(conn: &Connection) -> Result<()> {
+    conn.execute_batch("ALTER TABLE notes ADD COLUMN pos TEXT NOT NULL DEFAULT '';")?;
+    let rows: Vec<(String, i64)> = {
+        let mut st = conn.prepare("SELECT owner, id FROM notes ORDER BY owner, position DESC, id DESC")?;
+        let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+        v
+    };
+    let mut i = 0;
+    while i < rows.len() {
+        let owner = &rows[i].0;
+        let group: Vec<i64> = rows[i..].iter().take_while(|(o, _)| o == owner).map(|(_, id)| *id).collect();
+        // the first card in display order gets the largest key
+        let keys = chuck_core::domain::order::spread(group.len());
+        for (id, key) in group.iter().zip(keys.iter().rev()) {
+            conn.execute("UPDATE notes SET pos=?1 WHERE id=?2", params![key, id])?;
+        }
+        i += group.len();
+    }
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS notes_owner_position;
+         ALTER TABLE notes DROP COLUMN position;
+         ALTER TABLE notes RENAME COLUMN pos TO position;
+         CREATE INDEX notes_owner_position ON notes(owner, position);",
+    )?;
     Ok(())
 }
 
@@ -410,10 +443,8 @@ impl RecordTx for SqliteTx<'_> {
         Ok(v)
     }
 
-    fn set_positions(&mut self, owner: &str, positions: &[(i64, f64)]) -> Result<()> {
-        for (id, pos) in positions {
-            self.tx.execute("UPDATE notes SET position=?1 WHERE id=?2 AND owner=?3", params![pos, id, owner])?;
-        }
+    fn set_position(&mut self, owner: &str, id: i64, position: &str) -> Result<()> {
+        self.tx.execute("UPDATE notes SET position=?1 WHERE id=?2 AND owner=?3", params![position, id, owner])?;
         Ok(())
     }
 

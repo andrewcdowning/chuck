@@ -23,7 +23,8 @@ pub struct NoteRecord {
     pub schedule: Schedule,
     /// Unchecked checklist items. More than 0 puts the card in the top group.
     pub open_todos: i64,
-    pub position: f64,
+    /// A string that sorts in display order (see `chuck_core::domain::order`): the highest is shown first.
+    pub position: String,
     /// Sorted by name.
     pub tags: Vec<String>,
     /// In display order.
@@ -73,7 +74,8 @@ pub trait RecordTx {
     fn slot(&mut self, owner: &str, id: i64) -> Result<Option<Slot>>;
     /// Position data for all of the owner's cards, in display order, with ids.
     fn slots(&mut self, owner: &str) -> Result<Vec<(i64, Slot)>>;
-    fn set_positions(&mut self, owner: &str, positions: &[(i64, f64)]) -> Result<()>;
+    /// Sets one card's position. Nothing else changes: positions never need renumbering.
+    fn set_position(&mut self, owner: &str, id: i64, position: &str) -> Result<()>;
     /// Tag names with how many cards use each: most used first, then by name.
     fn tag_counts(&mut self, owner: &str) -> Result<Vec<TagCount>>;
 

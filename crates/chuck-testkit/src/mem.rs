@@ -53,7 +53,7 @@ fn words(body: &str) -> Vec<String> {
 fn display_order(a: &(i64, &NoteRecord), b: &(i64, &NoteRecord)) -> std::cmp::Ordering {
     let (pa, pb) = (a.1.open_todos > 0, b.1.open_todos > 0);
     pb.cmp(&pa)
-        .then(b.1.position.partial_cmp(&a.1.position).unwrap_or(std::cmp::Ordering::Equal))
+        .then(b.1.position.cmp(&a.1.position))
         .then(b.0.cmp(&a.0))
 }
 
@@ -161,20 +161,18 @@ impl RecordTx for MemTx<'_> {
     }
 
     fn slot(&mut self, owner: &str, id: i64) -> Result<Option<Slot>> {
-        Ok(self.s.notes.get(&id).filter(|(o, _)| o == owner).map(|(_, r)| Slot { pos: r.position, pinned: r.open_todos > 0, due: r.schedule.due_at }))
+        Ok(self.s.notes.get(&id).filter(|(o, _)| o == owner).map(|(_, r)| Slot { pos: r.position.clone(), pinned: r.open_todos > 0, due: r.schedule.due_at }))
     }
 
     fn slots(&mut self, owner: &str) -> Result<Vec<(i64, Slot)>> {
         let mut all: Vec<(i64, &NoteRecord)> = self.s.notes.iter().filter(|(_, (o, _))| o == owner).map(|(id, (_, r))| (*id, r)).collect();
         all.sort_by(display_order);
-        Ok(all.into_iter().map(|(id, r)| (id, Slot { pos: r.position, pinned: r.open_todos > 0, due: r.schedule.due_at })).collect())
+        Ok(all.into_iter().map(|(id, r)| (id, Slot { pos: r.position.clone(), pinned: r.open_todos > 0, due: r.schedule.due_at })).collect())
     }
 
-    fn set_positions(&mut self, owner: &str, positions: &[(i64, f64)]) -> Result<()> {
-        for (id, pos) in positions {
-            if self.mine(owner, *id) {
-                self.s.notes.get_mut(id).unwrap().1.position = *pos;
-            }
+    fn set_position(&mut self, owner: &str, id: i64, position: &str) -> Result<()> {
+        if self.mine(owner, id) {
+            self.s.notes.get_mut(&id).unwrap().1.position = position.to_string();
         }
         Ok(())
     }

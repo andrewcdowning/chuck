@@ -24,7 +24,7 @@ cases!(
     auto_tag_rules,
     attachments_are_owned_ordered_and_cascade,
     manual_order_within_groups,
-    many_moves_into_one_gap_renumber,
+    many_moves_into_one_gap,
     search_contract,
     update_semantics,
     paging,

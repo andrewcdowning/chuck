@@ -27,7 +27,7 @@ pub fn run_notes(make: &Make) {
     auto_tag_rules(make);
     attachments_are_owned_ordered_and_cascade(make);
     manual_order_within_groups(make);
-    many_moves_into_one_gap_renumber(make);
+    many_moves_into_one_gap(make);
     search_contract(make);
     update_semantics(make);
     paging(make);
@@ -278,13 +278,14 @@ pub fn manual_order_within_groups(make: &Make) {
     assert_eq!(ids(&*s)[..4], [t3, t2, t1, t4]);
 }
 
-pub fn many_moves_into_one_gap_renumber(make: &Make) {
+pub fn many_moves_into_one_gap(make: &Make) {
     let s = make();
     let mk = |b: &str| NoteInput { body: b.into(), ..Default::default() };
     let x = s.create("me", &mk("x")).unwrap().id;
     let y = s.create("me", &mk("y")).unwrap().id;
     let movers: Vec<i64> = (0..80).map(|i| s.create("me", &mk(&format!("m{i}"))).unwrap().id).collect();
-    // keep pushing cards between y and the previous mover: halves the gap every time (far past f64 precision)
+    // keep pushing cards between y and the previous mover: halves the gap every time, more often than any fixed-size
+    // number could stand
     let mut below = x;
     for m in &movers {
         s.move_note("me", *m, Some(y), Some(below)).unwrap();
