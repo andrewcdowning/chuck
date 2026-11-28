@@ -1,3 +1,6 @@
+use crate::domain::card::tags_for;
+use crate::domain::schedule::{self, Schedule, ScheduleInput};
+use crate::domain::{input, order, search};
 use crate::store::*;
 use crate::tagging::{feedback_offset, strip_hashtags, Doc, Model, SuggestionSet, MIN_DOCS_TO_CALIBRATE};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -11,6 +14,14 @@ pub struct SqliteStore {
     /// Bumped whenever note text changes; cached tagging models are rebuilt when it moves.
     generation: AtomicU64,
     models: Mutex<HashMap<String, (u64, Arc<Model>)>>,
+}
+
+fn schedule_input(i: &NoteInput) -> ScheduleInput<'_> {
+    ScheduleInput { remind_at: i.remind_at, repeat: i.repeat.as_deref(), reminder_done: i.reminder_done, due_at: i.due_at }
+}
+
+fn move_error(e: order::MoveError) -> StoreError {
+    StoreError::Invalid(e.message().into())
 }
 
 fn now() -> i64 {
@@ -160,51 +171,21 @@ impl SqliteStore {
         let all = Self::ordered(conn, owner)?;
         let n = all.len();
         for (k, (id, ..)) in all.iter().enumerate() {
-            conn.execute("UPDATE notes SET position=?1 WHERE id=?2 AND owner=?3", params![(n - k) as f64, id, owner])?;
+            conn.execute("UPDATE notes SET position=?1 WHERE id=?2 AND owner=?3", params![order::renumbered(n, k), id, owner])?;
         }
         Ok(())
     }
 
-    /// A position between two neighbours (either may be missing). None if they are too close to split.
-    fn between(above: Option<f64>, below: Option<f64>) -> Option<f64> {
-        let p = match (above, below) {
-            (Some(a), Some(b)) => (a + b) / 2.0,
-            (Some(a), None) => a - 1.0,
-            (None, Some(b)) => b + 1.0,
-            (None, None) => 1.0,
-        };
-        let ok = above.map_or(true, |a| a - p > 1e-9) && below.map_or(true, |b| p - b > 1e-9);
-        ok.then_some(p)
-    }
-
-    /// Where a new card goes. Ordinary cards go on top. A new open todo is slotted by due date among the open todos
-    /// as they are currently ordered: just above the first one due later (or undated); undated todos go last.
+    /// Where a new card goes: the pure rule in `domain::order`, with one renumbering if the gap is used up.
     fn new_position(conn: &Connection, owner: &str, open_todo: bool, due: Option<i64>) -> Result<f64> {
-        let all = Self::ordered(conn, owner)?;
-        let top = all.iter().map(|x| x.1).fold(0.0_f64, f64::max);
-        if !open_todo {
-            let rest_top = all.iter().filter(|x| !x.2).map(|x| x.1).fold(f64::MIN, f64::max);
-            return Ok(if rest_top == f64::MIN { top + 1.0 } else { rest_top.max(top) + 1.0 });
-        }
-        let group: Vec<_> = all.iter().filter(|x| x.2).collect();
-        if group.is_empty() {
-            return Ok(top + 1.0);
-        }
-        let later = |d: Option<i64>| match (due, d) {
-            (Some(a), Some(b)) => b > a,
-            (Some(_), None) => true,
-            (None, _) => false,
-        };
-        let idx = group.iter().position(|x| later(x.3)).unwrap_or(group.len());
-        let above = if idx == 0 { None } else { Some(group[idx - 1].1) };
-        let below = group.get(idx).map(|x| x.1);
-        match Self::between(above, below) {
-            Some(p) => Ok(p),
-            None => {
-                Self::renumber(conn, owner)?;
-                Self::new_position(conn, owner, open_todo, due)
+        for _ in 0..2 {
+            let slots: Vec<order::Slot> = Self::ordered(conn, owner)?.into_iter().map(|(_, pos, pinned, due)| order::Slot { pos, pinned, due }).collect();
+            match order::place_new(&slots, open_todo, due) {
+                order::Place::At(p) => return Ok(p),
+                order::Place::Renumber => Self::renumber(conn, owner)?,
             }
         }
+        Err(StoreError::Other("could not place card".into()))
     }
 
     /// Notes that carry at least one tag the user wrote, with the hashtags stripped from the text.
@@ -311,22 +292,10 @@ impl SqliteStore {
         Ok(rows)
     }
 
-    /// Tags written in the text plus tags added by the owner's rules.
-    fn tags_for(rules: &[(String, String)], body: &str) -> Vec<String> {
-        let mut tags = extract_tags(body);
-        let lower = body.to_lowercase();
-        for (pattern, tag) in rules {
-            if rule_matches(pattern, &lower) && !tags.contains(tag) {
-                tags.push(tag.clone());
-            }
-        }
-        tags
-    }
-
     fn set_tags(conn: &Connection, owner: &str, id: i64, body: &str) -> Result<()> {
         let rules = Self::rule_pairs(conn, owner)?;
         conn.execute("DELETE FROM note_tags WHERE note_id=?1", [id])?;
-        for t in Self::tags_for(&rules, body) {
+        for t in tags_for(&rules, body) {
             conn.execute("INSERT OR IGNORE INTO note_tags(note_id, tag) VALUES(?1, ?2)", params![id, t])?;
         }
         Ok(())
@@ -335,12 +304,7 @@ impl SqliteStore {
 
 /// Turn user input into a safe FTS5 query: each word quoted, prefix-matched.
 fn fts_query(q: &str) -> Option<String> {
-    let parts: Vec<String> = q
-        .split_whitespace()
-        .map(|w| w.replace('"', ""))
-        .filter(|w| !w.is_empty())
-        .map(|w| format!("\"{}\"*", w))
-        .collect();
+    let parts: Vec<String> = search::terms(q).into_iter().map(|w| format!("\"{}\"*", w)).collect();
     if parts.is_empty() { None } else { Some(parts.join(" ")) }
 }
 
@@ -349,9 +313,8 @@ impl NoteStore for SqliteStore {
         let body = input.body.as_str();
         let conn = self.conn.lock().unwrap();
         let t = now();
-        let remind_at = input.remind_at.filter(|v| *v > 0);
-        let repeat = input.repeat.clone().filter(|r| !r.is_empty());
-        let due_at = input.due_at.filter(|v| *v > 0);
+        let sch = schedule::for_new(&schedule_input(input));
+        let (remind_at, repeat, due_at) = (sch.remind_at, sch.repeat, sch.due_at);
         let position = Self::new_position(&conn, owner, open_items(body) > 0, due_at)?;
         conn.execute(
             "INSERT INTO notes(owner, body, created_at, updated_at, remind_at, repeat, due_at, open_todos, position) VALUES(?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -368,24 +331,8 @@ impl NoteStore for SqliteStore {
         let body = input.body.as_str();
         let conn = self.conn.lock().unwrap();
         let cur = Self::load(&conn, owner, id)?;
-        let remind_at = match input.remind_at {
-            None => cur.remind_at,
-            Some(v) if v <= 0 => None,
-            Some(v) => Some(v),
-        };
-        let repeat = match &input.repeat {
-            None => cur.repeat.clone(),
-            Some(r) if r.is_empty() => None,
-            Some(r) => Some(r.clone()),
-        };
-        let done = input
-            .reminder_done
-            .unwrap_or(if remind_at != cur.remind_at { false } else { cur.reminder_done });
-        let due_at = match input.due_at {
-            None => cur.due_at,
-            Some(v) if v <= 0 => None,
-            Some(v) => Some(v),
-        };
+        let cur_sch = Schedule { remind_at: cur.remind_at, repeat: cur.repeat.clone(), reminder_done: cur.reminder_done, due_at: cur.due_at };
+        let Schedule { remind_at, repeat, reminder_done: done, due_at } = schedule::merged(&cur_sch, &schedule_input(input));
         conn.execute(
             "UPDATE notes SET body=?1, updated_at=?2, remind_at=?3, repeat=?4, reminder_done=?5, due_at=?6, open_todos=?7 WHERE id=?8 AND owner=?9",
             params![body, now(), remind_at, repeat, done as i64, due_at, open_items(body), id, owner],
@@ -456,12 +403,7 @@ impl NoteStore for SqliteStore {
                 return Err(StoreError::NotFound);
             }
         }
-        if prev.is_none() && next.is_none() {
-            return Err(StoreError::Invalid("give the card above or below the new place".into()));
-        }
-        if prev == Some(id) || next == Some(id) {
-            return Err(StoreError::Invalid("a card cannot be its own neighbour".into()));
-        }
+        order::check_request(id, prev, next).map_err(move_error)?;
         let conn = self.conn.lock().unwrap();
         let info = |nid: i64| -> Result<(f64, bool)> {
             conn.query_row("SELECT position, open_todos > 0 FROM notes WHERE id=?1 AND owner=?2", params![nid, owner], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -471,21 +413,14 @@ impl NoteStore for SqliteStore {
         let (_, pinned) = info(id)?;
         let mut above = prev.map(info).transpose()?;
         let mut below = next.map(info).transpose()?;
-        if above.iter().chain(below.iter()).any(|(_, p)| *p != pinned) {
-            return Err(StoreError::Invalid("open todo cards stay above the other cards; move it within its group".into()));
-        }
-        if let (Some(a), Some(b)) = (above, below) {
-            if a.0 < b.0 {
-                return Err(StoreError::Invalid("the card above must come before the card below".into()));
-            }
-        }
-        let pos = match Self::between(above.map(|x| x.0), below.map(|x| x.0)) {
+        order::check_neighbours(pinned, above, below).map_err(move_error)?;
+        let pos = match order::between(above.map(|x| x.0), below.map(|x| x.0)) {
             Some(p) => p,
             None => {
                 Self::renumber(&conn, owner)?;
                 above = prev.map(info).transpose()?;
                 below = next.map(info).transpose()?;
-                Self::between(above.map(|x| x.0), below.map(|x| x.0)).ok_or_else(|| StoreError::Other("could not place card".into()))?
+                order::between(above.map(|x| x.0), below.map(|x| x.0)).ok_or_else(|| StoreError::Other("could not place card".into()))?
             }
         };
         conn.execute("UPDATE notes SET position=?1 WHERE id=?2 AND owner=?3", params![pos, id, owner])?;
@@ -496,7 +431,7 @@ impl NoteStore for SqliteStore {
         let model = self.model(owner)?;
         let conn = self.conn.lock().unwrap();
         // Tags already written, or about to be added by a rule, are not suggestions.
-        let taken = Self::tags_for(&Self::rule_pairs(&conn, owner)?, text);
+        let taken = tags_for(&Self::rule_pairs(&conn, owner)?, text);
         let mut st = conn.prepare(
             "SELECT tag, SUM(action='accepted'), SUM(action='dismissed') FROM suggestion_events WHERE owner=?1 GROUP BY tag",
         )?;
@@ -560,7 +495,7 @@ impl NoteStore for SqliteStore {
         let mut changed = 0;
         for (id, body) in notes {
             let mut before: Vec<String> = Self::load(&conn, owner, id)?.tags;
-            let mut after = Self::tags_for(&rules, &body);
+            let mut after = tags_for(&rules, &body);
             before.sort();
             after.sort();
             if before != after {
@@ -582,7 +517,7 @@ impl NoteStore for SqliteStore {
             params![note_id, owner],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        if count >= MAX_ATTACHMENTS_PER_NOTE {
+        if !input::has_room_for_attachment(count) {
             return Err(StoreError::Invalid("too many attachments on this card".into()));
         }
         conn.execute(
