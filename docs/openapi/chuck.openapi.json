@@ -1,0 +1,1947 @@
+{
+    "openapi": "3.0.2",
+    "info": {
+        "title": "Chuck",
+        "version": "2025-01-01",
+        "description": "The Chuck HTTP API. Every operation requires a signed-in user; how the user signs in (local, shared token, proxy\nheader, JWT) is decided by the deployment, so no authentication scheme is modelled here. Each user sees only their\nown data, administrators included. Error bodies are always `{\"error\": \"<message>\"}`."
+    },
+    "paths": {
+        "/api/admin/users": {
+            "get": {
+                "operationId": "ListUsers",
+                "responses": {
+                    "200": {
+                        "description": "ListUsers 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ListUsersOutputPayload"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden 403 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ForbiddenResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/admin/users/delete": {
+            "post": {
+                "description": "Deletes another account and everything it owns. To keep someone out without deleting, disable the account.",
+                "operationId": "DeleteUser",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/DeleteUserRequestContent"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "204": {
+                        "description": "DeleteUser 204 response"
+                    },
+                    "400": {
+                        "description": "BadRequest 400 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BadRequestResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden 403 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ForbiddenResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "NotFound 404 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/admin/users/status": {
+            "post": {
+                "description": "Disables or enables an account. A disabled account is refused on every endpoint. Not allowed on your own account.\nIds are sent in the body because they may contain slashes.",
+                "operationId": "SetUserStatus",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SetUserStatusRequestContent"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "SetUserStatus 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/User"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "BadRequest 400 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BadRequestResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden 403 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ForbiddenResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "NotFound 404 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/export": {
+            "get": {
+                "description": "All matching notes as one Markdown file, oldest first. Takes the same filters as ListNotes; paging is ignored.",
+                "operationId": "ExportNotes",
+                "parameters": [
+                    {
+                        "name": "q",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "tag",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "from",
+                        "in": "query",
+                        "description": "Unix seconds.",
+                        "schema": {
+                            "type": "number",
+                            "description": "Unix seconds."
+                        }
+                    },
+                    {
+                        "name": "to",
+                        "in": "query",
+                        "description": "Unix seconds.",
+                        "schema": {
+                            "type": "number",
+                            "description": "Unix seconds."
+                        }
+                    },
+                    {
+                        "name": "reminders",
+                        "in": "query",
+                        "schema": {
+                            "type": "boolean"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "ExportNotes 200 response",
+                        "headers": {
+                            "Content-Disposition": {
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "content": {
+                            "text/markdown": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ExportNotesOutputPayload"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/me": {
+            "delete": {
+                "description": "Permanently erases the caller's account, notes, files and rules. Signing in again starts a new, empty account.",
+                "operationId": "DeleteMe",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/DeleteMeRequestContent"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "204": {
+                        "description": "DeleteMe 204 response"
+                    },
+                    "400": {
+                        "description": "BadRequest 400 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BadRequestResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "get": {
+                "operationId": "GetMe",
+                "responses": {
+                    "200": {
+                        "description": "GetMe 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/User"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/me/export": {
+            "get": {
+                "description": "Everything the caller owns as one ZIP: notes (JSON and Markdown), rules, suggestion feedback and original files.\nFails with 413 when the files total more than 1 GB.",
+                "operationId": "ExportMe",
+                "responses": {
+                    "200": {
+                        "description": "ExportMe 200 response",
+                        "headers": {
+                            "Content-Disposition": {
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "content": {
+                            "application/zip": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ExportMeOutputPayload"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "413": {
+                        "description": "TooLarge 413 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/TooLargeResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/media/{id}": {
+            "delete": {
+                "operationId": "DeleteMedia",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "schema": {
+                            "type": "number"
+                        },
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "DeleteMedia 204 response"
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "NotFound 404 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "get": {
+                "description": "Serves a file, or its preview with thumb=true. Supports Range (206) and conditional (304) requests. The response is\ncacheable for a long time only when v matches the attachment's current version.",
+                "operationId": "GetMedia",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "schema": {
+                            "type": "number"
+                        },
+                        "required": true
+                    },
+                    {
+                        "name": "thumb",
+                        "in": "query",
+                        "schema": {
+                            "type": "boolean"
+                        }
+                    },
+                    {
+                        "name": "v",
+                        "in": "query",
+                        "description": "The attachment's version, from its JSON.",
+                        "schema": {
+                            "type": "string",
+                            "description": "The attachment's version, from its JSON."
+                        }
+                    },
+                    {
+                        "name": "If-None-Match",
+                        "in": "header",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "Range",
+                        "in": "header",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "GetMedia 200 response",
+                        "headers": {
+                            "Cache-Control": {
+                                "schema": {
+                                    "type": "string"
+                                }
+                            },
+                            "Content-Range": {
+                                "schema": {
+                                    "type": "string"
+                                }
+                            },
+                            "Content-Type": {
+                                "schema": {
+                                    "type": "string"
+                                }
+                            },
+                            "ETag": {
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "content": {
+                            "application/octet-stream": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/GetMediaOutputPayload"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "NotFound 404 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/media/{id}/thumb": {
+            "put": {
+                "description": "The body is a small preview image (at most 1024 pixels on each side) made by the client.",
+                "operationId": "PutThumb",
+                "requestBody": {
+                    "content": {
+                        "application/octet-stream": {
+                            "schema": {
+                                "$ref": "#/components/schemas/PutThumbInputPayload"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "schema": {
+                            "type": "number"
+                        },
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "PutThumb 204 response"
+                    },
+                    "400": {
+                        "description": "BadRequest 400 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BadRequestResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "NotFound 404 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "413": {
+                        "description": "TooLarge 413 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/TooLargeResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/notes": {
+            "get": {
+                "description": "Newest first; open todos come first. Supports full-text search, a tag, a date range and paging.",
+                "operationId": "ListNotes",
+                "parameters": [
+                    {
+                        "name": "q",
+                        "in": "query",
+                        "description": "Free-text search (prefix match on each word).",
+                        "schema": {
+                            "type": "string",
+                            "description": "Free-text search (prefix match on each word)."
+                        }
+                    },
+                    {
+                        "name": "tag",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "from",
+                        "in": "query",
+                        "description": "Inclusive range on created_at.",
+                        "schema": {
+                            "type": "number",
+                            "description": "Inclusive range on created_at."
+                        }
+                    },
+                    {
+                        "name": "to",
+                        "in": "query",
+                        "description": "Unix seconds.",
+                        "schema": {
+                            "type": "number",
+                            "description": "Unix seconds."
+                        }
+                    },
+                    {
+                        "name": "reminders",
+                        "in": "query",
+                        "description": "Only pending reminders, soonest first.",
+                        "schema": {
+                            "type": "boolean",
+                            "description": "Only pending reminders, soonest first."
+                        }
+                    },
+                    {
+                        "name": "limit",
+                        "in": "query",
+                        "schema": {
+                            "type": "number"
+                        }
+                    },
+                    {
+                        "name": "offset",
+                        "in": "query",
+                        "schema": {
+                            "type": "number"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "ListNotes 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ListNotesOutputPayload"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "operationId": "CreateNote",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/NoteInput"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "parameters": [
+                    {
+                        "name": "media",
+                        "in": "query",
+                        "description": "Set when files will be uploaded next, so the card may start without text.",
+                        "schema": {
+                            "type": "boolean",
+                            "description": "Set when files will be uploaded next, so the card may start without text."
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "CreateNote 201 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Note"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "BadRequest 400 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BadRequestResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/notes/{id}": {
+            "delete": {
+                "operationId": "DeleteNote",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "schema": {
+                            "type": "number"
+                        },
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "DeleteNote 204 response"
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "NotFound 404 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "put": {
+                "operationId": "UpdateNote",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/NoteInput"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "schema": {
+                            "type": "number"
+                        },
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "UpdateNote 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Note"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "BadRequest 400 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BadRequestResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "NotFound 404 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/notes/{id}/attachments": {
+            "post": {
+                "description": "The body is the raw file (image, or WebM, Ogg, M4A, MP3 or WAV audio). The type is detected from the bytes and\nlocation metadata is stripped before storing.",
+                "operationId": "AddAttachment",
+                "requestBody": {
+                    "content": {
+                        "application/octet-stream": {
+                            "schema": {
+                                "$ref": "#/components/schemas/AddAttachmentInputPayload"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "schema": {
+                            "type": "number"
+                        },
+                        "required": true
+                    },
+                    {
+                        "name": "name",
+                        "in": "query",
+                        "description": "Original file name (display only).",
+                        "schema": {
+                            "type": "string",
+                            "description": "Original file name (display only)."
+                        }
+                    },
+                    {
+                        "name": "duration_ms",
+                        "in": "query",
+                        "description": "Audio length measured by the browser, 0 to 6 hours (display only).",
+                        "schema": {
+                            "type": "number",
+                            "description": "Audio length measured by the browser, 0 to 6 hours (display only)."
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "AddAttachment 201 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Attachment"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "BadRequest 400 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BadRequestResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "NotFound 404 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "413": {
+                        "description": "TooLarge 413 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/TooLargeResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/notes/{id}/move": {
+            "post": {
+                "description": "Puts a card between two neighbours. At least one of prev and next is required. Open todos stay above other cards.",
+                "operationId": "MoveNote",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/MoveNoteRequestContent"
+                            }
+                        }
+                    }
+                },
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "schema": {
+                            "type": "number"
+                        },
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "MoveNote 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Note"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "BadRequest 400 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BadRequestResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "NotFound 404 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/rules": {
+            "get": {
+                "operationId": "ListRules",
+                "responses": {
+                    "200": {
+                        "description": "ListRules 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ListRulesOutputPayload"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "operationId": "AddRule",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/AddRuleRequestContent"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "201": {
+                        "description": "AddRule 201 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Rule"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "BadRequest 400 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BadRequestResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/rules/apply": {
+            "post": {
+                "description": "Applies every rule to the caller's existing notes.",
+                "operationId": "ApplyRules",
+                "responses": {
+                    "200": {
+                        "description": "ApplyRules 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ApplyRulesResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/rules/{id}": {
+            "delete": {
+                "operationId": "DeleteRule",
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "schema": {
+                            "type": "number"
+                        },
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "DeleteRule 204 response"
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "NotFound 404 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/NotFoundResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/suggest": {
+            "post": {
+                "description": "Suggests tags for text being written, from the caller's own tagged notes.",
+                "operationId": "Suggest",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SuggestRequestContent"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "Suggest 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SuggestionSet"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/suggest/feedback": {
+            "post": {
+                "operationId": "SuggestionFeedback",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SuggestionFeedbackRequestContent"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "204": {
+                        "description": "SuggestionFeedback 204 response"
+                    },
+                    "400": {
+                        "description": "BadRequest 400 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/BadRequestResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/tags": {
+            "get": {
+                "operationId": "ListTags",
+                "responses": {
+                    "200": {
+                        "description": "ListTags 200 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ListTagsOutputPayload"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized 401 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "InternalError 500 response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "schemas": {
+            "AccountStatus": {
+                "type": "string",
+                "enum": [
+                    "active",
+                    "disabled"
+                ]
+            },
+            "AddAttachmentInputPayload": {
+                "type": "string",
+                "format": "byte"
+            },
+            "AddRuleRequestContent": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string"
+                    },
+                    "tag": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "pattern",
+                    "tag"
+                ]
+            },
+            "ApplyRulesResponseContent": {
+                "type": "object",
+                "properties": {
+                    "changed": {
+                        "type": "number",
+                        "description": "Number of notes whose tags changed."
+                    }
+                },
+                "required": [
+                    "changed"
+                ]
+            },
+            "Attachment": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "number"
+                    },
+                    "note_id": {
+                        "type": "number"
+                    },
+                    "mime": {
+                        "type": "string",
+                        "description": "Detected from the file's bytes."
+                    },
+                    "bytes": {
+                        "type": "number"
+                    },
+                    "width": {
+                        "type": "number"
+                    },
+                    "height": {
+                        "type": "number"
+                    },
+                    "duration_ms": {
+                        "type": "number",
+                        "description": "Audio length as measured by the uploading browser (display only)."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Original file name (display only)."
+                    },
+                    "has_thumb": {
+                        "type": "boolean"
+                    },
+                    "v": {
+                        "type": "string",
+                        "description": "Changes whenever the file or its preview changes; put it in the media URL so caches never show a stale file."
+                    }
+                },
+                "required": [
+                    "bytes",
+                    "has_thumb",
+                    "id",
+                    "mime",
+                    "note_id",
+                    "v"
+                ]
+            },
+            "BadRequestResponseContent": {
+                "type": "object",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
+                ]
+            },
+            "CardKind": {
+                "type": "string",
+                "enum": [
+                    "note",
+                    "todo",
+                    "reminder",
+                    "media"
+                ]
+            },
+            "DeleteMeRequestContent": {
+                "type": "object",
+                "properties": {
+                    "confirm": {
+                        "type": "string",
+                        "description": "Must equal the account id."
+                    }
+                },
+                "required": [
+                    "confirm"
+                ]
+            },
+            "DeleteUserRequestContent": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "id"
+                ]
+            },
+            "ExportMeOutputPayload": {
+                "type": "string",
+                "format": "byte"
+            },
+            "ExportNotesOutputPayload": {
+                "type": "string",
+                "format": "byte"
+            },
+            "FeedbackAction": {
+                "type": "string",
+                "enum": [
+                    "accepted",
+                    "dismissed"
+                ]
+            },
+            "ForbiddenResponseContent": {
+                "type": "object",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
+                ]
+            },
+            "GetMediaOutputPayload": {
+                "type": "string",
+                "format": "byte"
+            },
+            "InternalErrorResponseContent": {
+                "type": "object",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
+                ]
+            },
+            "ListNotesOutputPayload": {
+                "description": "A bare JSON array (Smithy cannot model one, so it is a document): Note objects."
+            },
+            "ListRulesOutputPayload": {
+                "description": "A bare JSON array (Smithy cannot model one, so it is a document): Rule objects."
+            },
+            "ListTagsOutputPayload": {
+                "description": "A bare JSON array (Smithy cannot model one, so it is a document): TagCount objects."
+            },
+            "ListUsersOutputPayload": {
+                "description": "A bare JSON array (Smithy cannot model one, so it is a document): UserSummary objects."
+            },
+            "MoveNoteRequestContent": {
+                "type": "object",
+                "properties": {
+                    "prev": {
+                        "type": "number",
+                        "description": "The card that will be directly above this one, or absent for the top of its group."
+                    },
+                    "next": {
+                        "type": "number",
+                        "description": "The card that will be directly below this one, or absent for the bottom."
+                    }
+                }
+            },
+            "NotFoundResponseContent": {
+                "type": "object",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
+                ]
+            },
+            "Note": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "number"
+                    },
+                    "kind": {
+                        "$ref": "#/components/schemas/CardKind"
+                    },
+                    "body": {
+                        "type": "string"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "created_at": {
+                        "type": "number",
+                        "description": "Unix seconds."
+                    },
+                    "updated_at": {
+                        "type": "number",
+                        "description": "Unix seconds."
+                    },
+                    "remind_at": {
+                        "type": "number",
+                        "description": "Next time the reminder is due."
+                    },
+                    "repeat": {
+                        "$ref": "#/components/schemas/Repeat"
+                    },
+                    "reminder_done": {
+                        "type": "boolean"
+                    },
+                    "due_at": {
+                        "type": "number",
+                        "description": "Due date of a todo card."
+                    },
+                    "attachments": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/Attachment"
+                        }
+                    }
+                },
+                "required": [
+                    "attachments",
+                    "body",
+                    "created_at",
+                    "id",
+                    "kind",
+                    "reminder_done",
+                    "tags",
+                    "updated_at"
+                ]
+            },
+            "NoteInput": {
+                "type": "object",
+                "properties": {
+                    "body": {
+                        "type": "string"
+                    },
+                    "remind_at": {
+                        "type": "number",
+                        "description": "Unix seconds."
+                    },
+                    "repeat": {
+                        "$ref": "#/components/schemas/Repeat"
+                    },
+                    "reminder_done": {
+                        "type": "boolean"
+                    },
+                    "due_at": {
+                        "type": "number",
+                        "description": "Unix seconds."
+                    }
+                },
+                "required": [
+                    "body"
+                ]
+            },
+            "PutThumbInputPayload": {
+                "type": "string",
+                "format": "byte"
+            },
+            "Repeat": {
+                "type": "string",
+                "enum": [
+                    "daily",
+                    "weekdays",
+                    "weekly",
+                    "monthly"
+                ]
+            },
+            "Role": {
+                "type": "string",
+                "enum": [
+                    "user",
+                    "admin"
+                ]
+            },
+            "Rule": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "number"
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Keywords separated by `|` or `,`; the rule fires if any appears (case-insensitive)."
+                    },
+                    "tag": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "id",
+                    "pattern",
+                    "tag"
+                ]
+            },
+            "SetUserStatusRequestContent": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string"
+                    },
+                    "active": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "active",
+                    "id"
+                ]
+            },
+            "SuggestRequestContent": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "text"
+                ]
+            },
+            "Suggestion": {
+                "type": "object",
+                "properties": {
+                    "tag": {
+                        "type": "string"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Estimated probability (0 to 1) that the tag fits.",
+                        "format": "double"
+                    },
+                    "tier": {
+                        "type": "string",
+                        "description": "\"high\" or \"medium\"."
+                    },
+                    "why": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "The strongest evidence, for display."
+                    }
+                },
+                "required": [
+                    "confidence",
+                    "tag",
+                    "tier",
+                    "why"
+                ]
+            },
+            "SuggestionFeedbackRequestContent": {
+                "type": "object",
+                "properties": {
+                    "tag": {
+                        "type": "string"
+                    },
+                    "action": {
+                        "$ref": "#/components/schemas/FeedbackAction"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "The confidence that was shown for the suggestion.",
+                        "format": "double"
+                    }
+                },
+                "required": [
+                    "action",
+                    "tag"
+                ]
+            },
+            "SuggestionSet": {
+                "type": "object",
+                "properties": {
+                    "suggestions": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/Suggestion"
+                        }
+                    },
+                    "tagged_notes": {
+                        "type": "number",
+                        "description": "Notes with at least one tag the user wrote: what the model learned from."
+                    },
+                    "calibrated": {
+                        "type": "boolean"
+                    },
+                    "calibrate_at": {
+                        "type": "number",
+                        "description": "Tagged notes needed before calibration."
+                    }
+                },
+                "required": [
+                    "calibrate_at",
+                    "calibrated",
+                    "suggestions",
+                    "tagged_notes"
+                ]
+            },
+            "TooLargeResponseContent": {
+                "type": "object",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
+                ]
+            },
+            "UnauthorizedResponseContent": {
+                "type": "object",
+                "properties": {
+                    "error": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "error"
+                ]
+            },
+            "User": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string"
+                    },
+                    "display_name": {
+                        "type": "string"
+                    },
+                    "role": {
+                        "$ref": "#/components/schemas/Role"
+                    },
+                    "status": {
+                        "$ref": "#/components/schemas/AccountStatus"
+                    },
+                    "created_at": {
+                        "type": "number",
+                        "description": "Unix seconds."
+                    },
+                    "last_seen_at": {
+                        "type": "number",
+                        "description": "Unix seconds."
+                    }
+                },
+                "required": [
+                    "created_at",
+                    "id",
+                    "role",
+                    "status"
+                ]
+            }
+        }
+    }
+}

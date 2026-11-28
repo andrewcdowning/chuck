@@ -25,6 +25,8 @@ Everything is a card with a `kind`: `note`, `todo` (a card with `- [ ]` items, s
 
 - **Accounts:** every signed-in user id gets a separate account; nobody can read another's cards, files or rules, administrators included. List administrators in `CHUCK_ADMINS` (the `local` user is one when auth is local-only). The sidebar **Account** panel exports your data as a ZIP (notes as JSON and Markdown, rules, feedback, original files, up to 1 GB), deletes your account, and, for administrators, lists accounts (counts and sizes only) with Disable, Enable and Delete. See [docs/AUTH.md](docs/AUTH.md) and [docs/specs/multi-user.md](docs/specs/multi-user.md).
 
+- **API contract:** the API is described by a Smithy model with generated OpenAPI. See [docs/API.md](docs/API.md).
+
 ## Extension points
 
 - `store::NoteStore`: storage trait. Add Postgres/DynamoDB by implementing it and choosing it in `main.rs`.
