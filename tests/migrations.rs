@@ -84,3 +84,58 @@ fn a_failed_step_leaves_the_previous_version_and_no_partial_changes() {
     assert_eq!(tables(&c), vec!["a", "b"]);
     assert_eq!(c.query_row::<i64, _, _>("SELECT COUNT(*) FROM a", [], |r| r.get(0)).unwrap(), 1, "step a did not run twice");
 }
+
+#[test]
+fn positions_become_text_and_every_board_keeps_its_order() {
+    let p = temp_db("positions");
+    let (before, big_before) = {
+        // a database as the previous release left it: step 1 only, positions are numbers
+        let mut c = Connection::open(&p).unwrap();
+        c.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run_migrations(&mut c, &MIGRATIONS[..1]).unwrap();
+        assert_eq!(version(&p), 1);
+        let ins = |owner: &str, id: i64, open: i64, pos: f64| {
+            c.execute(
+                "INSERT INTO notes(id, owner, body, created_at, updated_at, open_todos, position) VALUES(?1, ?2, ?3, 1, 1, ?4, ?5)",
+                rusqlite::params![id, owner, format!("card {id}"), open, pos],
+            )
+            .unwrap();
+        };
+        // positions interleave between the groups, include ties and a value that was nearly out of precision
+        for (id, open, pos) in [(1, 0, 5.0), (2, 1, 2.0), (3, 0, 4.0), (4, 1, 9.0), (5, 0, 4.0), (6, 0, 4.000000001), (7, 0, 0.0)] {
+            ins("me", id, open, pos);
+        }
+        ins("you", 100, 0, 1.0);
+        for i in 0..200 {
+            ins("big", 1000 + i, 0, (i as f64) * 1.5);
+        }
+        let order = |c: &Connection, owner: &str| -> Vec<i64> {
+            let mut st = c.prepare("SELECT id FROM notes WHERE owner=?1 ORDER BY (open_todos > 0) DESC, position DESC, id DESC").unwrap();
+            st.query_map([owner], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+        };
+        (order(&c, "me"), order(&c, "big"))
+    };
+
+    let s = SqliteStore::open(&p).unwrap();
+    let ids = |owner: &str| s.list(owner, &chuck::store::NoteQuery { limit: Some(200), ..Default::default() }).unwrap().into_iter().map(|n| n.id).collect::<Vec<_>>();
+    assert_eq!(ids("me"), before, "the board is exactly as it was");
+    assert_eq!(ids("big"), big_before);
+    assert_eq!(ids("you"), vec![100]);
+
+    // new cards and moves work on the converted data
+    let top = s.create("me", &NoteInput { body: "new".into(), ..Default::default() }).unwrap().id;
+    assert_eq!(ids("me").iter().position(|i| *i == top), Some(before.iter().take_while(|i| [4, 2].contains(i)).count()), "a new card goes above the other cards (below open todos)");
+    s.move_note("me", 7, Some(1), Some(3)).unwrap();
+    let after = ids("me");
+    let at = |id: i64| after.iter().position(|i| *i == id).unwrap();
+    assert!(at(1) < at(7) && at(7) < at(3));
+    drop(s);
+
+    let c = Connection::open(&p).unwrap();
+    assert_eq!(version(&p), 2);
+    let types: Vec<String> = c.prepare("SELECT DISTINCT typeof(position) FROM notes").unwrap().query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+    assert_eq!(types, vec!["text"]);
+    let index: i64 = c.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='notes_owner_position'", [], |r| r.get(0)).unwrap();
+    assert_eq!(index, 1);
+    let _ = std::fs::remove_file(&p);
+}

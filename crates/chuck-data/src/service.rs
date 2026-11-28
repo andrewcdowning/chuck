@@ -5,7 +5,7 @@
 
 use chuck_core::domain::card::{card_kind, open_items, tags_for};
 use chuck_core::domain::input;
-use chuck_core::domain::order::{self, Place};
+use chuck_core::domain::order;
 use chuck_core::domain::schedule::{self, ScheduleInput};
 use chuck_core::domain::search;
 use crate::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
@@ -55,24 +55,9 @@ fn rule_pairs(tx: &mut dyn RecordTx, owner: &str) -> Result<Vec<(String, String)
     Ok(tx.rules(owner)?.into_iter().map(|r| (r.pattern, r.tag)).collect())
 }
 
-/// Spreads the owner's positions to whole numbers, keeping the order. Needed only after very many moves into the same
-/// gap have used up the precision of the numbers.
-fn renumber(tx: &mut dyn RecordTx, owner: &str) -> Result<()> {
-    let all = tx.slots(owner)?;
-    let n = all.len();
-    let positions: Vec<(i64, f64)> = all.iter().enumerate().map(|(k, (id, _))| (*id, order::renumbered(n, k))).collect();
-    tx.set_positions(owner, &positions)
-}
-
-fn new_position(tx: &mut dyn RecordTx, owner: &str, open_todo: bool, due: Option<i64>) -> Result<f64> {
-    for _ in 0..2 {
-        let slots: Vec<_> = tx.slots(owner)?.into_iter().map(|(_, s)| s).collect();
-        match order::place_new(&slots, open_todo, due) {
-            Place::At(p) => return Ok(p),
-            Place::Renumber => renumber(tx, owner)?,
-        }
-    }
-    Err(StoreError::Other("could not place card".into()))
+fn new_position(tx: &mut dyn RecordTx, owner: &str, open_todo: bool, due: Option<i64>) -> Result<String> {
+    let slots: Vec<_> = tx.slots(owner)?.into_iter().map(|(_, s)| s).collect();
+    Ok(order::place_new(&slots, open_todo, due))
 }
 
 impl<'a, R: NoteRecords> NoteService<'a, R> {
@@ -147,22 +132,14 @@ impl<'a, R: NoteRecords> NoteService<'a, R> {
             // Ownership first: someone else's card is NotFound whatever else is wrong with the request.
             let me = tx.slot(owner, id)?.ok_or(StoreError::NotFound)?;
             order::check_request(id, prev, next).map_err(move_error)?;
-            let neighbour = |tx: &mut dyn RecordTx, n: Option<i64>| -> Result<Option<(f64, bool)>> {
+            let neighbour = |tx: &mut dyn RecordTx, n: Option<i64>| -> Result<Option<(String, bool)>> {
                 n.map(|n| tx.slot(owner, n)?.map(|s| (s.pos, s.pinned)).ok_or(StoreError::NotFound)).transpose()
             };
-            let mut above = neighbour(tx, prev)?;
-            let mut below = neighbour(tx, next)?;
-            order::check_neighbours(me.pinned, above, below).map_err(move_error)?;
-            let pos = match order::between(above.map(|x| x.0), below.map(|x| x.0)) {
-                Some(p) => p,
-                None => {
-                    renumber(tx, owner)?;
-                    above = neighbour(tx, prev)?;
-                    below = neighbour(tx, next)?;
-                    order::between(above.map(|x| x.0), below.map(|x| x.0)).ok_or_else(|| StoreError::Other("could not place card".into()))?
-                }
-            };
-            tx.set_positions(owner, &[(id, pos)])?;
+            let above = neighbour(tx, prev)?;
+            let below = neighbour(tx, next)?;
+            order::check_neighbours(me.pinned, above.as_ref().map(|(p, g)| (p.as_str(), *g)), below.as_ref().map(|(p, g)| (p.as_str(), *g))).map_err(move_error)?;
+            let pos = order::key_between(below.as_ref().map(|x| x.0.as_str()), above.as_ref().map(|x| x.0.as_str()));
+            tx.set_position(owner, id, &pos)?;
             tx.get_note(owner, id)?.map(to_note).ok_or(StoreError::NotFound)
         })
     }

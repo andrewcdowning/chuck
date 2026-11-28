@@ -175,8 +175,11 @@ All six were taken as recommended (approved by the project owner).
 
 - **D1 ids.** Keep `i64` ids (no API change, SQLite-shaped) or move to opaque string ids (ULIDs) before the cloud store.
   Recommended: opaque ids, as its own PR after phase 2, with the page and tests updated together.
-- **D2 ordering key.** Replace float positions with a fractional-index string (sorts lexicographically, no renumbering,
-  works in any store). Needs a data migration for existing databases. Recommended.
+- **D2 ordering key.** Done: positions are base-62 text keys (`0-9A-Za-z`, never ending in `0`), compared as text. There is
+  always a key between two others, so a move writes one card and nothing is renumbered. Cards added on top or dragged to
+  the top or bottom lengthen keys by about one character per 60 moves; moving cards into the very same gap over and over
+  lengthens them by about one character per five. Existing databases are converted by schema step 2, which keeps every
+  board exactly as it was (checked on a copy of a real database).
 - **D3 account status cache.** The data plane accepts a cached `Principal` for a short TTL, so a disabled account may keep
   working for up to that long. Recommended 30 seconds, with an explicit "flush now" on disable inside one process. Over
   Lambda the TTL is the real bound; say if that is too loose for work use.
