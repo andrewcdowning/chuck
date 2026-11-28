@@ -1,6 +1,6 @@
 # Spec: service layer and the three planes
 
-Status: approved. Decisions D1 to D6 were taken as recommended. Phases 0 to 4 are built (PRs #21 to #25) and phase 5 is in progress; later phases are not.
+Status: approved. Decisions D1 to D6 were taken as recommended. Phases 0 to 5 are built (PRs #21 to #26) and phase 6 is in progress; phase 7 is not.
 
 Fixes findings A1 to A7 and B1 to B8 in [../ARCHITECTURE-REVIEW.md](../ARCHITECTURE-REVIEW.md), and prepares the split into
 packages needed for API Gateway and Lambda.

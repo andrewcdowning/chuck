@@ -1,255 +1,11 @@
 {
     "openapi": "3.0.2",
     "info": {
-        "title": "Chuck",
+        "title": "ChuckData",
         "version": "2025-01-01",
-        "description": "The Chuck HTTP API. Every operation requires a signed-in user; how the user signs in (local, shared token, proxy\nheader, JWT) is decided by the deployment, so no authentication scheme is modelled here. Each user sees only their\nown data, administrators included. Error bodies are always `{\"error\": \"<message>\"}`."
+        "description": "The data plane: a user's own cards, tags, rules, files and tag suggestions. Every operation requires a signed-in user;\nhow the user signs in (local, shared token, proxy header, JWT) is decided by the deployment, so no authentication\nscheme is modelled here. Each user sees only their own data, administrators included."
     },
     "paths": {
-        "/api/admin/maintenance/sweep": {
-            "post": {
-                "description": "Deletes stored files that no card refers to and that have not been written for ten minutes (files of deleted cards and\nattachments, replaced previews, leftovers of interrupted uploads). Also runs on a schedule. Reports counts only.",
-                "operationId": "SweepOrphans",
-                "responses": {
-                    "200": {
-                        "description": "SweepOrphans 200 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/SweepOrphansResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized 401 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "Forbidden 403 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/ForbiddenResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "InternalError 500 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/api/admin/users": {
-            "get": {
-                "operationId": "ListUsers",
-                "responses": {
-                    "200": {
-                        "description": "ListUsers 200 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/ListUsersResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized 401 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "Forbidden 403 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/ForbiddenResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "InternalError 500 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/api/admin/users/delete": {
-            "post": {
-                "description": "Deletes another account and everything it owns. To keep someone out without deleting, disable the account.",
-                "operationId": "DeleteUser",
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/DeleteUserRequestContent"
-                            }
-                        }
-                    },
-                    "required": true
-                },
-                "responses": {
-                    "204": {
-                        "description": "DeleteUser 204 response"
-                    },
-                    "400": {
-                        "description": "BadRequest 400 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/BadRequestResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized 401 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "Forbidden 403 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/ForbiddenResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "404": {
-                        "description": "NotFound 404 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/NotFoundResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "InternalError 500 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/api/admin/users/status": {
-            "post": {
-                "description": "Disables or enables an account. A disabled account is refused on every endpoint. Not allowed on your own account.\nIds are sent in the body because they may contain slashes.",
-                "operationId": "SetUserStatus",
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/SetUserStatusRequestContent"
-                            }
-                        }
-                    },
-                    "required": true
-                },
-                "responses": {
-                    "200": {
-                        "description": "SetUserStatus 200 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/User"
-                                }
-                            }
-                        }
-                    },
-                    "400": {
-                        "description": "BadRequest 400 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/BadRequestResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized 401 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "403": {
-                        "description": "Forbidden 403 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/ForbiddenResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "404": {
-                        "description": "NotFound 404 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/NotFoundResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "InternalError 500 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
         "/api/export": {
             "get": {
                 "description": "All matching notes as one Markdown file, oldest first. Takes the same filters as ListNotes; paging is ignored.",
@@ -319,147 +75,6 @@
                             "application/json": {
                                 "schema": {
                                     "$ref": "#/components/schemas/UnauthorizedResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "InternalError 500 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/api/me": {
-            "delete": {
-                "description": "Permanently erases the caller's account, notes, files and rules. Signing in again starts a new, empty account.",
-                "operationId": "DeleteMe",
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "$ref": "#/components/schemas/DeleteMeRequestContent"
-                            }
-                        }
-                    },
-                    "required": true
-                },
-                "responses": {
-                    "204": {
-                        "description": "DeleteMe 204 response"
-                    },
-                    "400": {
-                        "description": "BadRequest 400 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/BadRequestResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized 401 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "InternalError 500 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            "get": {
-                "operationId": "GetMe",
-                "responses": {
-                    "200": {
-                        "description": "GetMe 200 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/User"
-                                }
-                            }
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized 401 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "InternalError 500 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/InternalErrorResponseContent"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "/api/me/export": {
-            "get": {
-                "description": "Everything the caller owns as one ZIP: notes (JSON and Markdown), rules, suggestion feedback and original files.\nFails with 413 when the files total more than 1 GB.",
-                "operationId": "ExportMe",
-                "responses": {
-                    "200": {
-                        "description": "ExportMe 200 response",
-                        "headers": {
-                            "Content-Disposition": {
-                                "schema": {
-                                    "type": "string"
-                                }
-                            }
-                        },
-                        "content": {
-                            "application/zip": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/ExportMeOutputPayload"
-                                }
-                            }
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized 401 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/UnauthorizedResponseContent"
-                                }
-                            }
-                        }
-                    },
-                    "413": {
-                        "description": "TooLarge 413 response",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/TooLargeResponseContent"
                                 }
                             }
                         }
@@ -1505,14 +1120,6 @@
     },
     "components": {
         "schemas": {
-            "AccountStatus": {
-                "type": "string",
-                "enum": [
-                    "active",
-                    "disabled",
-                    "deleting"
-                ]
-            },
             "AddAttachmentInputPayload": {
                 "type": "string",
                 "format": "byte"
@@ -1611,33 +1218,6 @@
                     "media"
                 ]
             },
-            "DeleteMeRequestContent": {
-                "type": "object",
-                "properties": {
-                    "confirm": {
-                        "type": "string",
-                        "description": "Must equal the account id."
-                    }
-                },
-                "required": [
-                    "confirm"
-                ]
-            },
-            "DeleteUserRequestContent": {
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "id"
-                ]
-            },
-            "ExportMeOutputPayload": {
-                "type": "string",
-                "format": "byte"
-            },
             "ExportNotesOutputPayload": {
                 "type": "string",
                 "format": "byte"
@@ -1647,17 +1227,6 @@
                 "enum": [
                     "accepted",
                     "dismissed"
-                ]
-            },
-            "ForbiddenResponseContent": {
-                "type": "object",
-                "properties": {
-                    "error": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "error"
                 ]
             },
             "GetMediaOutputPayload": {
@@ -1715,20 +1284,6 @@
                 },
                 "required": [
                     "tags"
-                ]
-            },
-            "ListUsersResponseContent": {
-                "type": "object",
-                "properties": {
-                    "users": {
-                        "type": "array",
-                        "items": {
-                            "$ref": "#/components/schemas/UserSummary"
-                        }
-                    }
-                },
-                "required": [
-                    "users"
                 ]
             },
             "MoveNoteRequestContent": {
@@ -1851,13 +1406,6 @@
                     "monthly"
                 ]
             },
-            "Role": {
-                "type": "string",
-                "enum": [
-                    "user",
-                    "admin"
-                ]
-            },
             "Rule": {
                 "type": "object",
                 "properties": {
@@ -1876,21 +1424,6 @@
                     "id",
                     "pattern",
                     "tag"
-                ]
-            },
-            "SetUserStatusRequestContent": {
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string"
-                    },
-                    "active": {
-                        "type": "boolean"
-                    }
-                },
-                "required": [
-                    "active",
-                    "id"
                 ]
             },
             "SuggestRequestContent": {
@@ -1982,33 +1515,6 @@
                     "tagged_notes"
                 ]
             },
-            "SweepOrphansResponseContent": {
-                "type": "object",
-                "properties": {
-                    "scanned": {
-                        "type": "number",
-                        "description": "Files looked at."
-                    },
-                    "removed": {
-                        "type": "number",
-                        "description": "Unused files deleted."
-                    },
-                    "too_new": {
-                        "type": "number",
-                        "description": "Unused files left alone because they were written too recently."
-                    },
-                    "failed": {
-                        "type": "number",
-                        "description": "Files that could not be deleted; they are tried again next time."
-                    }
-                },
-                "required": [
-                    "failed",
-                    "removed",
-                    "scanned",
-                    "too_new"
-                ]
-            },
             "TagCount": {
                 "type": "object",
                 "properties": {
@@ -2044,82 +1550,6 @@
                 },
                 "required": [
                     "error"
-                ]
-            },
-            "User": {
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string"
-                    },
-                    "display_name": {
-                        "type": "string"
-                    },
-                    "role": {
-                        "$ref": "#/components/schemas/Role"
-                    },
-                    "status": {
-                        "$ref": "#/components/schemas/AccountStatus"
-                    },
-                    "created_at": {
-                        "type": "number",
-                        "description": "Unix seconds."
-                    },
-                    "last_seen_at": {
-                        "type": "number",
-                        "description": "Unix seconds."
-                    }
-                },
-                "required": [
-                    "created_at",
-                    "id",
-                    "role",
-                    "status"
-                ]
-            },
-            "UserSummary": {
-                "type": "object",
-                "description": "What an administrator sees about an account: counts and sizes, never content.",
-                "properties": {
-                    "id": {
-                        "type": "string"
-                    },
-                    "display_name": {
-                        "type": "string"
-                    },
-                    "role": {
-                        "$ref": "#/components/schemas/Role"
-                    },
-                    "status": {
-                        "$ref": "#/components/schemas/AccountStatus"
-                    },
-                    "created_at": {
-                        "type": "number",
-                        "description": "Unix seconds."
-                    },
-                    "last_seen_at": {
-                        "type": "number",
-                        "description": "Unix seconds."
-                    },
-                    "notes": {
-                        "type": "number"
-                    },
-                    "attachments": {
-                        "type": "number"
-                    },
-                    "storage_bytes": {
-                        "type": "number",
-                        "description": "Total size of the account's stored files (previews not counted)."
-                    }
-                },
-                "required": [
-                    "attachments",
-                    "created_at",
-                    "id",
-                    "notes",
-                    "role",
-                    "status",
-                    "storage_bytes"
                 ]
             }
         }
