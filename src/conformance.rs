@@ -2,19 +2,24 @@
 //! ownership, limits, accounts) in terms of the trait only, so any backend can be checked by pointing a test at it:
 //!
 //! ```ignore
-//! fn make() -> Box<dyn NoteStore> { Box::new(MyStore::open_empty()) }
+//! fn make() -> Arc<dyn NoteStore> { Arc::new(MyStore::open_empty()) }
 //! chuck::conformance::run_all(&make);
 //! ```
 //!
 //! `tests/store_conformance.rs` runs each case separately against SQLite. A meta-test there fails if a case is added
 //! here and not listed there. Backend-specific checks (migrations, file formats) stay with the backend.
 
+use crate::auth::Identity;
+use crate::blob::{BlobStore, MemBlobStore};
+use crate::control::{AccountRecords, AccountService, AccountStatus, OwnerPurger, OwnerRecords, Role};
 use crate::store::*;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Makes a new, empty store for one case.
-pub type Make = dyn Fn() -> Box<dyn NoteStore>;
+pub type Make = dyn Fn() -> Arc<dyn NoteStore>;
 
-/// The cards, tags, rules, attachments and tag suggestion cases: what the services provide over any backend.
+/// All cases: cards, tags, rules, attachments, tag suggestions and accounts. What the services provide over any backend.
 pub fn run_notes(make: &Make) {
     crud_tags_and_isolation(make);
     reminders(make);
@@ -31,17 +36,12 @@ pub fn run_notes(make: &Make) {
     ownership_is_checked_first(make);
     rule_cap(make);
     tag_suggestions_confidence_and_feedback(make);
-}
-
-/// The cases for parts that are not yet behind the record traits: accounts.
-pub fn run_extras(make: &Make) {
-    user_lifecycle(make);
+    account_lifecycle(make);
 }
 
 /// Runs every case. Each case builds its own store through `make`.
 pub fn run_all(make: &Make) {
     run_notes(make);
-    run_extras(make);
 }
 
 pub fn crud_tags_and_isolation(make: &Make) {
@@ -297,51 +297,73 @@ pub fn many_moves_into_one_gap_renumber(make: &Make) {
     assert_eq!(ids, expect);
 }
 
-pub fn user_lifecycle(make: &Make) {
+/// The account lifecycle through the control plane: first sight provisions, roles follow the configuration, disabling and
+/// deleting work, deleting erases everything the account owns (files included) and nothing of anyone else's, and a
+/// deleted account signs in again as a new, empty one.
+pub fn account_lifecycle(make: &Make) {
     let s = make();
-    // first sight creates the account; later calls keep it, update the name, follow the admin list
-    let u = s.touch_user("alice", None, false).unwrap();
-    assert_eq!((u.role.as_str(), u.status.as_str(), u.display_name.clone()), ("user", "active", None));
-    assert!(u.last_seen_at.is_some());
-    let u = s.touch_user("alice", Some("Alice A"), true).unwrap();
-    assert_eq!((u.role.as_str(), u.display_name.as_deref()), ("admin", Some("Alice A")));
-    let u = s.touch_user("alice", None, false).unwrap();
-    assert_eq!((u.role.as_str(), u.display_name.as_deref()), ("user", Some("Alice A")), "role follows config; a missing name keeps the old one");
-    s.touch_user("bob", None, false).unwrap();
-    assert_eq!(s.list_users().unwrap().iter().map(|u| u.user.id.as_str()).collect::<Vec<_>>(), vec!["alice", "bob"]);
+    let (accounts, blobs) = accounts_for(&s, ["alice"]);
+    let ident = |id: &str, name: Option<&str>| Identity { id: id.into(), name: name.map(String::from) };
 
-    // disabling is visible on the next touch and does not count as activity
-    assert_eq!(s.set_user_active("bob", false).unwrap().status, "disabled");
-    assert_eq!(s.touch_user("bob", None, false).unwrap().status, "disabled");
-    assert_eq!(s.set_user_active("bob", true).unwrap().status, "active");
-    assert!(matches!(s.set_user_active("nobody", false), Err(StoreError::NotFound)));
+    // first sight creates the account; later calls keep it, update the name, follow the admin list
+    let p = accounts.resolve(&ident("alice", None)).unwrap();
+    assert_eq!((p.role, p.status, p.display_name.clone()), (Role::Admin, AccountStatus::Active, None));
+    assert!(accounts.get("alice").unwrap().last_seen_at.is_some());
+    let p = accounts.resolve(&ident("alice", Some("Alice A"))).unwrap();
+    assert_eq!(p.display_name.as_deref(), Some("Alice A"));
+    let (not_admin, _) = accounts_for(&s, Vec::<String>::new());
+    let p = not_admin.resolve(&ident("alice", None)).unwrap();
+    assert_eq!((p.role, p.display_name.as_deref()), (Role::User, Some("Alice A")), "role follows config; a missing name keeps the old one");
+    accounts.resolve(&ident("bob", None)).unwrap();
+    assert_eq!(accounts.summaries().unwrap().iter().map(|u| u.user.id.as_str()).collect::<Vec<_>>(), vec!["alice", "bob"]);
+
+    // disabling is visible on the next resolve and does not count as activity
+    assert_eq!(accounts.set_active("bob", false).unwrap().status, "disabled");
+    assert_eq!(accounts.resolve(&ident("bob", None)).unwrap().status, AccountStatus::Disabled);
+    s.update_account_profile("bob", None, "user", Some(1)).unwrap();
+    assert_eq!(accounts.get("bob").unwrap().status, "disabled", "a profile update never changes the status");
+    assert_eq!(accounts.set_active("bob", true).unwrap().status, "active");
+    assert!(matches!(accounts.set_active("nobody", false), Err(StoreError::NotFound)));
 
     // everything an account owns goes with it, and nothing of anyone else's
     let inp = |b: &str| NoteInput { body: b.into(), ..Default::default() };
     let mine = s.create("alice", &inp("ALICEWORD plan #secret")).unwrap();
-    s.create("bob", &inp("BOBWORD plan #other")).unwrap();
+    let bobs = s.create("bob", &inp("BOBWORD plan #other")).unwrap();
     s.add_rule("alice", "ALICEWORD", "secret").unwrap();
     s.record_suggestion_feedback("alice", "secret", true, 0.9).unwrap();
+    for k in ["alice/f1", "alice/t1", "bob/f1"] {
+        blobs.put(k, b"x").unwrap();
+    }
     let new = |k: &str| NewAttachment { mime: "image/jpeg".into(), bytes: 100, width: Some(1), height: Some(1), duration_ms: None, name: None, blob_key: k.into(), sha256: "x".into() };
     let a = s.add_attachment("alice", mine.id, &new("alice/f1")).unwrap();
     s.set_attachment_thumb("alice", a.id, "alice/t1").unwrap();
-    s.add_attachment("bob", s.list("bob", &NoteQuery::default()).unwrap()[0].id, &new("bob/f1")).unwrap();
-    let summary = s.list_users().unwrap();
+    s.add_attachment("bob", bobs.id, &new("bob/f1")).unwrap();
+    let summary = accounts.summaries().unwrap();
     let alice = summary.iter().find(|u| u.user.id == "alice").unwrap();
     assert_eq!((alice.notes, alice.attachments, alice.storage_bytes), (1, 1, 100));
 
-    let keys = s.delete_user("alice").unwrap();
-    assert_eq!(keys, vec!["alice/f1".to_string(), "alice/t1".to_string()]);
+    accounts.delete("alice").unwrap();
+    assert!(blobs.get("alice/f1").is_err() && blobs.get("alice/t1").is_err(), "her files are deleted");
+    assert!(blobs.get("bob/f1").is_ok(), "his are not");
     assert!(s.list("alice", &NoteQuery { q: Some("ALICEWORD".into()), ..Default::default() }).unwrap().is_empty(), "search index cleaned");
     assert!(s.tags("alice").unwrap().is_empty() && s.rules("alice").unwrap().is_empty() && s.feedback_events("alice").unwrap().is_empty());
     assert!(matches!(s.attachment("alice", a.id), Err(StoreError::NotFound)));
-    assert_eq!(s.list_users().unwrap().len(), 1);
+    assert_eq!(accounts.summaries().unwrap().len(), 1);
     assert_eq!(s.list("bob", &NoteQuery::default()).unwrap().len(), 1, "bob untouched");
     assert!(s.blob_referenced("bob", "bob/f1").unwrap());
-    assert!(matches!(s.delete_user("alice"), Err(StoreError::NotFound)));
+    assert!(matches!(accounts.delete("alice"), Err(StoreError::NotFound)));
     // signing in again starts a fresh account
-    assert_eq!(s.touch_user("alice", None, false).unwrap().status, "active");
+    assert_eq!(accounts.resolve(&ident("alice", None)).unwrap().status, AccountStatus::Active);
     assert!(s.list("alice", &NoteQuery::default()).unwrap().is_empty());
+}
+
+fn accounts_for(s: &Arc<dyn NoteStore>, admins: impl IntoIterator<Item = impl Into<String>>) -> (AccountService, Arc<MemBlobStore>) {
+    let blobs = Arc::new(MemBlobStore::new());
+    let records: Arc<dyn OwnerRecords> = s.clone();
+    let data = Arc::new(OwnerPurger::new(records, blobs.clone()));
+    let accounts: Arc<dyn AccountRecords> = s.clone();
+    // a zero cache lifetime, so every call reads the stored record
+    (AccountService::new(accounts, data).with_admins(admins).with_cache_ttl(Duration::ZERO), blobs)
 }
 
 /// Search contract: case-insensitive (Unicode too), each word is a prefix of a word in the note, all words must match

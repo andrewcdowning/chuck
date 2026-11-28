@@ -251,6 +251,9 @@ enum Role {
 enum AccountStatus {
     ACTIVE = "active"
     DISABLED = "disabled"
+
+    /// Being erased after a delete request; refused on every endpoint. Deleting it again finishes the job.
+    DELETING = "deleting"
 }
 
 structure User {

@@ -1,7 +1,8 @@
 use crate::auth::Authenticator;
 use crate::blob::{self, BlobStore};
+use crate::control::{AccountRecords, AccountService, AccountStatus, OwnerPurger, OwnerRecords, Principal, DEFAULT_ACCOUNT_CACHE};
 use crate::media::{self, MediaError};
-use crate::store::{normalize_tag, NewAttachment, NoteInput, NoteQuery, NoteStore, RuleInput, StoreError, User};
+use crate::store::{normalize_tag, NewAttachment, NoteInput, NoteQuery, NoteStore, RuleInput, StoreError};
 use crate::domain::input::{self, clean_name, InputError, MAX_BODY};
 use serde::Deserialize;
 use axum::{
@@ -14,36 +15,91 @@ use axum::{
 };
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn NoteStore>,
     pub auth: Arc<dyn Authenticator>,
     pub blobs: Arc<dyn BlobStore>,
-    /// Owner ids that are administrators (`CHUCK_ADMINS`). Admins manage accounts; they cannot read anyone's content.
-    pub admins: Arc<HashSet<String>>,
+    /// The control plane: resolves identities to accounts and manages their lifecycle.
+    pub accounts: Arc<AccountService>,
+    admins: Arc<HashSet<String>>,
+    account_cache: Duration,
 }
 
 impl AppState {
-    /// No administrators.
+    /// No administrators; account status is cached for `control::DEFAULT_ACCOUNT_CACHE`.
     pub fn new(store: Arc<dyn NoteStore>, auth: Arc<dyn Authenticator>, blobs: Arc<dyn BlobStore>) -> Self {
-        Self { store, auth, blobs, admins: Arc::new(HashSet::new()) }
+        let admins = Arc::new(HashSet::new());
+        let accounts = Self::build(&store, &blobs, &admins, DEFAULT_ACCOUNT_CACHE);
+        Self { store, auth, blobs, accounts, admins, account_cache: DEFAULT_ACCOUNT_CACHE }
+    }
+
+    /// Owner ids that are administrators (`CHUCK_ADMINS`). Admins manage accounts; they cannot read anyone's content.
+    pub fn with_admins(mut self, admins: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.admins = Arc::new(admins.into_iter().map(Into::into).collect());
+        self.accounts = Self::build(&self.store, &self.blobs, &self.admins, self.account_cache);
+        self
+    }
+
+    /// How long a resolved account is reused before its record is read again (default 30 seconds).
+    pub fn with_account_cache(mut self, ttl: Duration) -> Self {
+        self.account_cache = ttl;
+        self.accounts = Self::build(&self.store, &self.blobs, &self.admins, ttl);
+        self
+    }
+
+    fn build(store: &Arc<dyn NoteStore>, blobs: &Arc<dyn BlobStore>, admins: &HashSet<String>, ttl: Duration) -> Arc<AccountService> {
+        let accounts: Arc<dyn AccountRecords> = store.clone();
+        let records: Arc<dyn OwnerRecords> = store.clone();
+        let data = Arc::new(OwnerPurger::new(records, blobs.clone()));
+        Arc::new(AccountService::new(accounts, data).with_admins(admins.iter().cloned()).with_cache_ttl(ttl))
     }
 }
 
-
-/// Turns away anonymous requests to /api before any body or query is parsed, so a malformed request cannot learn
-/// anything (such as a 422 that shows which route exists) without signing in. Handlers still do the full check.
-async fn require_identity(
-    axum::extract::State(s): axum::extract::State<AppState>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    if req.uri().path().starts_with("/api/") && s.auth.identity(req.headers()).is_none() {
-        return ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()).into_response();
+/// Authenticates every /api request once, before any body or query is parsed, and hands the handler a `Principal`.
+/// Anonymous callers get 401, so a malformed request cannot learn anything (such as a 422 that shows which route
+/// exists) without signing in. Disabled and deleting accounts are refused here, which makes that apply to every
+/// endpoint; /api/admin is refused to everyone but administrators.
+async fn require_principal(axum::extract::State(s): axum::extract::State<AppState>, mut req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let path = req.uri().path().to_string();
+    if !path.starts_with("/api/") {
+        return next.run(req).await;
     }
+    // Authentication may fetch signing keys over the network, and the account may be read or created, so this runs on a
+    // blocking thread.
+    let (auth, accounts, headers) = (s.auth.clone(), s.accounts.clone(), req.headers().clone());
+    let found = tokio::task::spawn_blocking(move || -> crate::store::Result<Option<Principal>> {
+        let Some(who) = auth.identity(&headers) else { return Ok(None) };
+        accounts.resolve(&who).map(Some)
+    })
+    .await;
+    let principal = match found {
+        Err(e) => return ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(Err(e)) => return ApiError::from(e).into_response(),
+        Ok(Ok(None)) => return ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()).into_response(),
+        Ok(Ok(Some(p))) => p,
+    };
+    match principal.status {
+        AccountStatus::Active => {}
+        AccountStatus::Disabled => return ApiError(StatusCode::UNAUTHORIZED, "this account is disabled".into()).into_response(),
+        AccountStatus::Deleting => return ApiError(StatusCode::UNAUTHORIZED, "this account is being deleted".into()).into_response(),
+    }
+    if path.starts_with("/api/admin/") && !principal.is_admin() {
+        return ApiError(StatusCode::FORBIDDEN, "administrators only".into()).into_response();
+    }
+    req.extensions_mut().insert(principal);
     next.run(req).await
+}
+
+#[axum::async_trait]
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Principal {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, _: &S) -> Result<Self, Self::Rejection> {
+        parts.extensions.get::<Principal>().cloned().ok_or(ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()))
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -71,11 +127,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/media/:id", get(get_media).delete(delete_media))
         .route("/api/media/:id/thumb", put(put_thumb).layer(DefaultBodyLimit::max(media::MAX_THUMB_BYTES + 1024)))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), require_identity))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), require_principal))
         .with_state(state)
 }
 
-struct ApiError(StatusCode, String);
+pub struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -94,37 +150,6 @@ impl From<StoreError> for ApiError {
             }
         }
     }
-}
-
-/// Who is calling, as an account. Authentication may fetch signing keys over the network, and the account is looked
-/// up (and created on first sight), so all of it runs on a blocking thread. A disabled account is refused here, which
-/// is what makes "disabled" apply to every endpoint.
-async fn session(s: &AppState, h: &HeaderMap) -> Result<User, ApiError> {
-    let (auth, store, admins, headers) = (s.auth.clone(), s.store.clone(), s.admins.clone(), h.clone());
-    let found = tokio::task::spawn_blocking(move || -> Result<Option<User>, StoreError> {
-        let Some(who) = auth.identity(&headers) else { return Ok(None) };
-        let admin = admins.contains(&who.id);
-        store.touch_user(&who.id, who.name.as_deref(), admin).map(Some)
-    })
-    .await
-    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
-    let user = found.ok_or(ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()))?;
-    if user.status != "active" {
-        return Err(ApiError(StatusCode::UNAUTHORIZED, "this account is disabled".into()));
-    }
-    Ok(user)
-}
-
-async fn owner(s: &AppState, h: &HeaderMap) -> Result<String, ApiError> {
-    Ok(session(s, h).await?.id)
-}
-
-async fn admin(s: &AppState, h: &HeaderMap) -> Result<User, ApiError> {
-    let u = session(s, h).await?;
-    if u.role != "admin" {
-        return Err(ApiError(StatusCode::FORBIDDEN, "administrators only".into()));
-    }
-    Ok(u)
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> crate::store::Result<T> + Send + 'static) -> Result<T, ApiError> {
@@ -150,16 +175,16 @@ struct CreateQuery {
     media: Option<bool>,
 }
 
-async fn create(State(s): State<AppState>, h: HeaderMap, Query(q): Query<CreateQuery>, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn create(State(s): State<AppState>, p: Principal, Query(q): Query<CreateQuery>, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let input = validate(b, q.media.unwrap_or(false))?;
     let st = s.store.clone();
     let n = blocking(move || st.create(&o, &input)).await?;
     Ok((StatusCode::CREATED, Json(n)))
 }
 
-async fn update(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn update(State(s): State<AppState>, p: Principal, Path(id): Path<i64>, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let st = s.store.clone();
     let has_media = {
         let (st, o) = (st.clone(), o.clone());
@@ -169,8 +194,8 @@ async fn update(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Js
     Ok(Json(blocking(move || st.update(&o, id, &input)).await?))
 }
 
-async fn remove(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn remove(State(s): State<AppState>, p: Principal, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
     blocking(move || {
         let note = st.get(&o, id)?;
@@ -183,14 +208,14 @@ async fn remove(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) ->
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list(State(s): State<AppState>, h: HeaderMap, Query(q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn list(State(s): State<AppState>, p: Principal, Query(q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let st = s.store.clone();
     Ok(Json(serde_json::json!({ "notes": blocking(move || st.list(&o, &q)).await? })))
 }
 
-async fn tags(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn tags(State(s): State<AppState>, p: Principal) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let st = s.store.clone();
     Ok(Json(serde_json::json!({ "tags": blocking(move || st.tags(&o)).await? })))
 }
@@ -200,8 +225,8 @@ struct SuggestInput {
     text: String,
 }
 
-async fn suggest(State(s): State<AppState>, h: HeaderMap, Json(b): Json<SuggestInput>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn suggest(State(s): State<AppState>, p: Principal, Json(b): Json<SuggestInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let text: String = b.text.chars().take(MAX_BODY).collect();
     let st = s.store.clone();
     Ok(Json(blocking(move || st.suggest_tags(&o, &text)).await?))
@@ -215,8 +240,8 @@ struct FeedbackInput {
     confidence: Option<f64>,
 }
 
-async fn suggestion_feedback(State(s): State<AppState>, h: HeaderMap, Json(b): Json<FeedbackInput>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn suggestion_feedback(State(s): State<AppState>, p: Principal, Json(b): Json<FeedbackInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let tag = normalize_tag(&b.tag).ok_or(ApiError(StatusCode::BAD_REQUEST, "invalid tag".into()))?;
     let accepted = match b.action.as_str() {
         "accepted" => true,
@@ -229,14 +254,14 @@ async fn suggestion_feedback(State(s): State<AppState>, h: HeaderMap, Json(b): J
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn rules(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn rules(State(s): State<AppState>, p: Principal) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let st = s.store.clone();
     Ok(Json(serde_json::json!({ "rules": blocking(move || st.rules(&o)).await? })))
 }
 
-async fn add_rule(State(s): State<AppState>, h: HeaderMap, Json(b): Json<RuleInput>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn add_rule(State(s): State<AppState>, p: Principal, Json(b): Json<RuleInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let pattern = b.pattern.trim().to_string();
     if pattern.is_empty() || pattern.chars().count() > 200 || !pattern.split(|c| c == '|' || c == ',').any(|k| !k.trim().is_empty()) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "keywords are empty or too long".into()));
@@ -247,23 +272,23 @@ async fn add_rule(State(s): State<AppState>, h: HeaderMap, Json(b): Json<RuleInp
     Ok((StatusCode::CREATED, Json(r)))
 }
 
-async fn delete_rule(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn delete_rule(State(s): State<AppState>, p: Principal, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let st = s.store.clone();
     blocking(move || st.delete_rule(&o, id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn apply_rules(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn apply_rules(State(s): State<AppState>, p: Principal) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let st = s.store.clone();
     let changed = blocking(move || st.apply_rules(&o)).await?;
     Ok(Json(serde_json::json!({ "changed": changed })))
 }
 
 /// Markdown download of every note (or the notes matching the same filters as `/api/notes`; paging is ignored).
-async fn export(State(s): State<AppState>, h: HeaderMap, Query(mut q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn export(State(s): State<AppState>, p: Principal, Query(mut q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let st = s.store.clone();
     let notes = blocking(move || {
         const PAGE: u32 = 200;
@@ -332,8 +357,8 @@ struct AttachQuery {
 }
 
 /// Body: the raw file. The type is detected from the bytes; metadata is stripped before storing.
-async fn add_attachment(State(s): State<AppState>, h: HeaderMap, Path(note_id): Path<i64>, Query(q): Query<AttachQuery>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn add_attachment(State(s): State<AppState>, p: Principal, Path(note_id): Path<i64>, Query(q): Query<AttachQuery>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
     let name = clean_name(q.name);
     let res = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
@@ -371,8 +396,8 @@ async fn add_attachment(State(s): State<AppState>, h: HeaderMap, Path(note_id): 
 }
 
 /// Body: a small preview image for the attachment, made by the client.
-async fn put_thumb(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn put_thumb(State(s): State<AppState>, p: Principal, Path(id): Path<i64>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
     tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
         st.attachment(&o, id)?;
@@ -399,8 +424,8 @@ struct MediaQuery {
     v: Option<String>,
 }
 
-async fn get_media(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Query(q): Query<MediaQuery>) -> Result<Response, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn get_media(State(s): State<AppState>, p: Principal, h: HeaderMap, Path(id): Path<i64>, Query(q): Query<MediaQuery>) -> Result<Response, ApiError> {
+    let o = p.id.clone();
     let if_none_match = h.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_string);
     let wanted_v = q.v.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
@@ -458,8 +483,8 @@ async fn get_media(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>,
     Ok(resp)
 }
 
-async fn delete_media(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn delete_media(State(s): State<AppState>, p: Principal, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
     blocking(move || {
         let a = st.delete_attachment(&o, id)?;
@@ -478,8 +503,8 @@ struct MoveInput {
     next: Option<i64>,
 }
 
-async fn move_note(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Json(b): Json<MoveInput>) -> Result<impl IntoResponse, ApiError> {
-    let o = owner(&s, &h).await?;
+async fn move_note(State(s): State<AppState>, p: Principal, Path(id): Path<i64>, Json(b): Json<MoveInput>) -> Result<impl IntoResponse, ApiError> {
+    let o = p.id.clone();
     let st = s.store.clone();
     Ok(Json(blocking(move || st.move_note(&o, id, b.prev, b.next)).await?))
 }
@@ -528,15 +553,16 @@ mod range_tests {
 
 // ---------------------------------------------------------------- accounts
 
-async fn me(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
-    Ok(Json(session(&s, &h).await?))
+async fn me(State(s): State<AppState>, p: Principal) -> Result<impl IntoResponse, ApiError> {
+    let accounts = s.accounts.clone();
+    Ok(Json(blocking(move || accounts.get(&p.id)).await?))
 }
 
 /// Everything the account owns, as one ZIP: notes (JSON and Markdown), tag rules, suggestion feedback, and the original
 /// files. Built in memory, so for now it is limited to 1 GB of files.
-async fn export_me(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
+async fn export_me(State(s): State<AppState>, p: Principal) -> Result<impl IntoResponse, ApiError> {
     const MAX_FILES_BYTES: i64 = 1 << 30;
-    let o = owner(&s, &h).await?;
+    let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
     let (zip, date) = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, String), ApiError> {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
@@ -594,34 +620,25 @@ struct ConfirmInput {
 }
 
 /// Deletes the caller's own account and all of its data and files. Signing in again starts a new, empty account.
-async fn delete_me(State(s): State<AppState>, h: HeaderMap, Json(b): Json<ConfirmInput>) -> Result<impl IntoResponse, ApiError> {
-    let me = session(&s, &h).await?;
-    if b.confirm != me.id {
+async fn delete_me(State(s): State<AppState>, p: Principal, Json(b): Json<ConfirmInput>) -> Result<impl IntoResponse, ApiError> {
+    if b.confirm != p.id {
         return Err(ApiError(StatusCode::BAD_REQUEST, "type your account name to confirm".into()));
     }
-    erase_account(&s, &me.id).await?;
+    erase_account(&s, &p.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Deletes an account and everything it owns, through the control plane (which marks it `deleting`, purges the data
+/// plane, and only then removes the account record).
 async fn erase_account(s: &AppState, id: &str) -> Result<(), ApiError> {
-    let (st, blobs, id) = (s.store.clone(), s.blobs.clone(), id.to_string());
-    blocking(move || {
-        let keys = st.delete_user(&id)?;
-        for k in keys {
-            if let Err(e) = blobs.delete(&k) {
-                eprintln!("could not delete blob {k}: {e}");
-            }
-        }
-        Ok(())
-    })
-    .await
+    let (accounts, id) = (s.accounts.clone(), id.to_string());
+    blocking(move || accounts.delete(&id)).await
 }
 
 /// Accounts with counts and sizes. Never any content.
-async fn admin_users(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
-    admin(&s, &h).await?;
-    let st = s.store.clone();
-    Ok(Json(serde_json::json!({ "users": blocking(move || st.list_users()).await? })))
+async fn admin_users(State(s): State<AppState>, _admin: Principal) -> Result<impl IntoResponse, ApiError> {
+    let accounts = s.accounts.clone();
+    Ok(Json(serde_json::json!({ "users": blocking(move || accounts.summaries()).await? })))
 }
 
 #[derive(Deserialize)]
@@ -630,13 +647,12 @@ struct StatusInput {
     active: bool,
 }
 
-async fn admin_user_status(State(s): State<AppState>, h: HeaderMap, Json(b): Json<StatusInput>) -> Result<impl IntoResponse, ApiError> {
-    let me = admin(&s, &h).await?;
+async fn admin_user_status(State(s): State<AppState>, me: Principal, Json(b): Json<StatusInput>) -> Result<impl IntoResponse, ApiError> {
     if b.id == me.id {
         return Err(ApiError(StatusCode::BAD_REQUEST, "you cannot disable your own account".into()));
     }
-    let st = s.store.clone();
-    Ok(Json(blocking(move || st.set_user_active(&b.id, b.active)).await?))
+    let accounts = s.accounts.clone();
+    Ok(Json(blocking(move || accounts.set_active(&b.id, b.active)).await?))
 }
 
 #[derive(Deserialize)]
@@ -645,8 +661,7 @@ struct IdInput {
 }
 
 /// Deletes another account and everything it owns. To keep someone out without deleting, disable the account.
-async fn admin_delete_user(State(s): State<AppState>, h: HeaderMap, Json(b): Json<IdInput>) -> Result<impl IntoResponse, ApiError> {
-    let me = admin(&s, &h).await?;
+async fn admin_delete_user(State(s): State<AppState>, me: Principal, Json(b): Json<IdInput>) -> Result<impl IntoResponse, ApiError> {
     if b.id == me.id {
         return Err(ApiError(StatusCode::BAD_REQUEST, "to delete your own account use Delete my account".into()));
     }

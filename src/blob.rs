@@ -117,3 +117,39 @@ mod tests {
         assert_eq!(FsBlobStore::default_dir("chuck.db"), PathBuf::from("chuck-media"));
     }
 }
+
+/// Keeps files in memory. For tests and as a template; everything is lost on exit.
+#[derive(Default)]
+pub struct MemBlobStore {
+    files: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+}
+
+impl MemBlobStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.files.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl BlobStore for MemBlobStore {
+    fn put(&self, key: &str, bytes: &[u8]) -> io::Result<()> {
+        self.files.lock().unwrap().insert(key.to_string(), bytes.to_vec());
+        Ok(())
+    }
+
+    fn get(&self, key: &str) -> io::Result<Vec<u8>> {
+        self.files.lock().unwrap().get(key).cloned().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
+    }
+
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.files.lock().unwrap().remove(key);
+        Ok(())
+    }
+}

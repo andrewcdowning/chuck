@@ -5,9 +5,9 @@
 //! `NoteService`. It is also a template for a real backend (a key-value or document store). Not for production: data is
 //! lost on exit, and each unit of work copies the whole state to stay atomic.
 //!
-//! `MemStore` offers everything in `NoteStore` except accounts, which belong to a later phase of the service split, so
-//! those methods answer `Invalid("not supported")` here.
+//! `MemStore` implements all of `NoteStore`, accounts included, so every conformance case runs on it.
 
+use crate::control::{AccountRecords, OwnerRecords, Usage};
 use crate::domain::order::Slot;
 use crate::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
 use crate::service::HasRecords;
@@ -27,6 +27,7 @@ struct State {
     rules: BTreeMap<i64, (String, Rule)>,
     versions: HashMap<String, u64>,
     feedback: Vec<(String, FeedbackEvent)>,
+    users: BTreeMap<String, User>,
 }
 
 #[derive(Default)]
@@ -345,6 +346,79 @@ impl MemStore {
     }
 }
 
+impl AccountRecords for MemRecords {
+    fn account(&self, id: &str) -> Result<Option<User>> {
+        Ok(self.state.lock().unwrap().users.get(id).cloned())
+    }
+
+    fn insert_account_if_absent(&self, u: &User) -> Result<bool> {
+        let mut st = self.state.lock().unwrap();
+        if st.users.contains_key(&u.id) {
+            return Ok(false);
+        }
+        st.users.insert(u.id.clone(), u.clone());
+        Ok(true)
+    }
+
+    fn update_account_profile(&self, id: &str, display_name: Option<&str>, role: &str, last_seen_at: Option<i64>) -> Result<()> {
+        if let Some(u) = self.state.lock().unwrap().users.get_mut(id) {
+            u.display_name = display_name.map(String::from);
+            u.role = role.to_string();
+            u.last_seen_at = last_seen_at;
+        }
+        Ok(())
+    }
+
+    fn set_account_status(&self, id: &str, status: &str) -> Result<bool> {
+        match self.state.lock().unwrap().users.get_mut(id) {
+            Some(u) => {
+                u.status = status.to_string();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn list_accounts(&self) -> Result<Vec<User>> {
+        let mut v: Vec<User> = self.state.lock().unwrap().users.values().cloned().collect();
+        v.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        Ok(v)
+    }
+
+    fn remove_account(&self, id: &str) -> Result<bool> {
+        Ok(self.state.lock().unwrap().users.remove(id).is_some())
+    }
+}
+
+impl OwnerRecords for MemRecords {
+    fn usage(&self, owner: &str) -> Result<Usage> {
+        let st = self.state.lock().unwrap();
+        let notes = st.notes.values().filter(|(o, _)| o == owner).count() as i64;
+        let (attachments, storage_bytes) =
+            st.attachments.values().filter(|(o, _, _)| o == owner).fold((0, 0), |(n, b), (_, _, a)| (n + 1, b + a.bytes));
+        Ok(Usage { notes, attachments, storage_bytes })
+    }
+
+    fn blob_keys(&self, owner: &str) -> Result<Vec<String>> {
+        let st = self.state.lock().unwrap();
+        let mut keys: Vec<String> =
+            st.attachments.values().filter(|(o, _, _)| o == owner).flat_map(|(_, _, a)| std::iter::once(a.blob_key.clone()).chain(a.thumb_key.clone())).collect();
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
+    }
+
+    fn purge_rows(&self, owner: &str) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        st.notes.retain(|_, (o, _)| o != owner);
+        st.attachments.retain(|_, (o, _, _)| o != owner);
+        st.rules.retain(|_, (o, _)| o != owner);
+        st.feedback.retain(|(o, _)| o != owner);
+        *st.versions.entry(owner.to_string()).or_insert(0) += 1;
+        Ok(())
+    }
+}
+
 impl HasTagModel for MemStore {
     fn tag_model(&self) -> TagModelService<'_> {
         TagModelService::new(&self.records, &self.models)
@@ -358,24 +432,41 @@ impl HasRecords for MemStore {
     }
 }
 
-fn unsupported<T>() -> Result<T> {
-    Err(StoreError::Invalid("not supported by MemStore".into()))
-}
-
 impl NoteStore for MemStore {
     crate::note_service_methods!();
     crate::tag_service_methods!();
+}
 
-    fn touch_user(&self, _id: &str, _display_name: Option<&str>, _admin: bool) -> Result<User> {
-        unsupported()
+impl AccountRecords for MemStore {
+    fn account(&self, id: &str) -> Result<Option<User>> {
+        self.records.account(id)
     }
-    fn list_users(&self) -> Result<Vec<UserSummary>> {
-        unsupported()
+    fn insert_account_if_absent(&self, u: &User) -> Result<bool> {
+        self.records.insert_account_if_absent(u)
     }
-    fn set_user_active(&self, _id: &str, _active: bool) -> Result<User> {
-        unsupported()
+    fn update_account_profile(&self, id: &str, display_name: Option<&str>, role: &str, last_seen_at: Option<i64>) -> Result<()> {
+        self.records.update_account_profile(id, display_name, role, last_seen_at)
     }
-    fn delete_user(&self, _id: &str) -> Result<Vec<String>> {
-        unsupported()
+    fn set_account_status(&self, id: &str, status: &str) -> Result<bool> {
+        self.records.set_account_status(id, status)
+    }
+    fn list_accounts(&self) -> Result<Vec<User>> {
+        self.records.list_accounts()
+    }
+    fn remove_account(&self, id: &str) -> Result<bool> {
+        self.records.remove_account(id)
+    }
+}
+
+impl OwnerRecords for MemStore {
+    fn usage(&self, owner: &str) -> Result<Usage> {
+        self.records.usage(owner)
+    }
+    fn blob_keys(&self, owner: &str) -> Result<Vec<String>> {
+        self.records.blob_keys(owner)
+    }
+    fn purge_rows(&self, owner: &str) -> Result<()> {
+        self.models.forget(owner);
+        self.records.purge_rows(owner)
     }
 }

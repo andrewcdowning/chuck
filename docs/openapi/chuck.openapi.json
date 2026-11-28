@@ -1461,7 +1461,8 @@
                 "type": "string",
                 "enum": [
                     "active",
-                    "disabled"
+                    "disabled",
+                    "deleting"
                 ]
             },
             "AddAttachmentInputPayload": {

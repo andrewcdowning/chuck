@@ -9,7 +9,6 @@ use chuck::auth::{sanitize_name, Authenticator, Identity};
 use chuck::{api, blob::FsBlobStore, sqlite::SqliteStore};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -36,8 +35,7 @@ struct App {
 fn app(name: &str) -> App {
     let media = std::env::temp_dir().join(format!("chuck-isolation-{name}-{}", std::process::id()));
     std::fs::remove_dir_all(&media).ok();
-    let mut state = api::AppState::new(Arc::new(SqliteStore::open(":memory:").unwrap()), Arc::new(HeaderUser), Arc::new(FsBlobStore::open(&media).unwrap()));
-    state.admins = Arc::new(HashSet::from(["root".to_string()]));
+    let state = api::AppState::new(Arc::new(SqliteStore::open(":memory:").unwrap()), Arc::new(HeaderUser), Arc::new(FsBlobStore::open(&media).unwrap())).with_admins(["root"]);
     App { router: api::router(state), media }
 }
 

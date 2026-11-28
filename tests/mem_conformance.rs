@@ -4,9 +4,10 @@
 use chuck::conformance as c;
 use chuck::mem::MemStore;
 use chuck::store::NoteStore;
+use std::sync::Arc;
 
-fn make() -> Box<dyn NoteStore> {
-    Box::new(MemStore::new())
+fn make() -> Arc<dyn NoteStore> {
+    Arc::new(MemStore::new())
 }
 
 macro_rules! cases {
@@ -31,20 +32,18 @@ cases!(
     attachment_cap,
     ownership_is_checked_first,
     rule_cap,
-    tag_suggestions_confidence_and_feedback
+    tag_suggestions_confidence_and_feedback,
+    account_lifecycle
 );
 
-/// Cases not run here need accounts, which are not behind the record traits yet.
-const NEEDS_EXTRAS: &[&str] = &["user_lifecycle"];
-
 #[test]
-fn every_case_runs_here_or_is_known_to_need_extras() {
+fn every_case_runs_here() {
     let src = include_str!("../src/conformance.rs");
     for n in src.lines().filter_map(|l| l.strip_prefix("pub fn ")).filter_map(|l| l.split('(').next()) {
-        if matches!(n, "run_all" | "run_notes" | "run_extras") {
+        if matches!(n, "run_all" | "run_notes") {
             continue;
         }
-        assert!(LISTED.contains(&n) || NEEDS_EXTRAS.contains(&n), "case {n} is neither run against MemStore nor listed as needing extras");
+        assert!(LISTED.contains(&n), "case {n} is not run against MemStore");
     }
 }
 

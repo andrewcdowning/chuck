@@ -1262,12 +1262,12 @@ async function loadUsers() {
   try { users = (await api("/api/admin/users")).users; } catch (e) { box.textContent = e.message; return; }
   const post = async (path, body) => { try { await api(path, { method: "POST", body: JSON.stringify(body) }); } catch (e) { $("acct-msg").textContent = e.message; } loadUsers(); };
   box.replaceChildren(...users.map(u => {
-    const label = (u.display_name ? u.display_name + " (" + u.id + ")" : u.id) + (u.role === "admin" ? " [admin]" : "") + (u.status !== "active" ? " [disabled]" : "");
+    const label = (u.display_name ? u.display_name + " (" + u.id + ")" : u.id) + (u.role === "admin" ? " [admin]" : "") + (u.status !== "active" ? " [" + u.status + "]" : "");
     const row = el("div", { className: "rule" }, el("span", { textContent: label }),
       el("span", { className: "hint", textContent: u.notes + " notes, " + u.attachments + " files, " + fmtBytes(u.storage_bytes) }));
     if (u.id !== ME.id) {
       row.append(
-        el("button", { className: "linkbtn", type: "button", textContent: u.status === "active" ? "Disable" : "Enable", onclick: () => post("/api/admin/users/status", { id: u.id, active: u.status !== "active" }) }),
+        ...(u.status === "deleting" ? [] : [el("button", { className: "linkbtn", type: "button", textContent: u.status === "active" ? "Disable" : "Enable", onclick: () => post("/api/admin/users/status", { id: u.id, active: u.status !== "active" }) })]),
         el("button", { className: "linkbtn", type: "button", textContent: "Delete", onclick: () => { if (confirm("Delete " + u.id + " and everything they own? This cannot be undone.")) post("/api/admin/users/delete", { id: u.id }); } }));
     }
     return row;

@@ -1,3 +1,4 @@
+use crate::control::{AccountRecords, OwnerRecords, Usage};
 use crate::domain::order::Slot;
 use crate::domain::schedule::Schedule;
 use crate::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
@@ -110,10 +111,28 @@ impl SqliteStore {
                id TEXT PRIMARY KEY,
                display_name TEXT,
                role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),
-               status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
+               status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled','deleting')),
                created_at INTEGER NOT NULL,
                last_seen_at INTEGER);",
         )?;
+        // Older databases allowed only 'active' and 'disabled'. Rebuild the table (a few rows) to also allow 'deleting'.
+        let users_sql: String = conn.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'", [], |r| r.get(0))?;
+        if !users_sql.contains("'deleting'") {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE users_new(
+                   id TEXT PRIMARY KEY,
+                   display_name TEXT,
+                   role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),
+                   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled','deleting')),
+                   created_at INTEGER NOT NULL,
+                   last_seen_at INTEGER);
+                 INSERT INTO users_new SELECT id, display_name, role, status, created_at, last_seen_at FROM users;
+                 DROP TABLE users;
+                 ALTER TABLE users_new RENAME TO users;
+                 COMMIT;",
+            )?;
+        }
         conn.execute(
             "INSERT OR IGNORE INTO users(id, created_at)
              SELECT owner, ?1 FROM (SELECT owner FROM notes UNION SELECT owner FROM tag_rules UNION SELECT owner FROM suggestion_events)",
@@ -529,6 +548,85 @@ impl TagSource for SqliteStore {
     }
 }
 
+fn user_row(r: &rusqlite::Row) -> rusqlite::Result<User> {
+    Ok(User { id: r.get(0)?, display_name: r.get(1)?, role: r.get(2)?, status: r.get(3)?, created_at: r.get(4)?, last_seen_at: r.get(5)? })
+}
+
+impl AccountRecords for SqliteStore {
+    fn account(&self, id: &str) -> Result<Option<User>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row("SELECT id, display_name, role, status, created_at, last_seen_at FROM users WHERE id=?1", [id], user_row).optional()?)
+    }
+
+    fn insert_account_if_absent(&self, u: &User) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO users(id, display_name, role, status, created_at, last_seen_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![u.id, u.display_name, u.role, u.status, u.created_at, u.last_seen_at],
+        )?;
+        Ok(n > 0)
+    }
+
+    fn update_account_profile(&self, id: &str, display_name: Option<&str>, role: &str, last_seen_at: Option<i64>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE users SET display_name=?1, role=?2, last_seen_at=?3 WHERE id=?4", params![display_name, role, last_seen_at, id])?;
+        Ok(())
+    }
+
+    fn set_account_status(&self, id: &str, status: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("UPDATE users SET status=?1 WHERE id=?2", params![status, id])? > 0)
+    }
+
+    fn list_accounts(&self) -> Result<Vec<User>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare("SELECT id, display_name, role, status, created_at, last_seen_at FROM users ORDER BY created_at, id")?;
+        let rows = st.query_map([], user_row)?.collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    fn remove_account(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM users WHERE id=?1", [id])? > 0)
+    }
+}
+
+impl OwnerRecords for SqliteStore {
+    fn usage(&self, owner: &str) -> Result<Usage> {
+        let conn = self.conn.lock().unwrap();
+        let notes: i64 = conn.query_row("SELECT COUNT(*) FROM notes WHERE owner=?1", [owner], |r| r.get(0))?;
+        let (attachments, storage_bytes): (i64, i64) =
+            conn.query_row("SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM attachments WHERE owner=?1", [owner], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(Usage { notes, attachments, storage_bytes })
+    }
+
+    fn blob_keys(&self, owner: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st = conn.prepare("SELECT blob_key, thumb_key FROM attachments WHERE owner=?1")?;
+        let rows: Vec<(String, Option<String>)> = st.query_map([owner], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+        let mut keys: Vec<String> = rows.into_iter().flat_map(|(a, b)| std::iter::once(a).chain(b)).collect();
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
+    }
+
+    fn purge_rows(&self, owner: &str) -> Result<()> {
+        {
+            let conn = self.conn.lock().unwrap();
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("DELETE FROM notes_fts WHERE rowid IN (SELECT id FROM notes WHERE owner=?1)", [owner])?;
+            tx.execute("DELETE FROM notes WHERE owner=?1", [owner])?; // tags and attachments follow by foreign key
+            tx.execute("DELETE FROM attachments WHERE owner=?1", [owner])?;
+            tx.execute("DELETE FROM tag_rules WHERE owner=?1", [owner])?;
+            tx.execute("DELETE FROM suggestion_events WHERE owner=?1", [owner])?;
+            tx.commit()?;
+        }
+        self.models.forget(owner);
+        self.bump_versions([owner.to_string()]);
+        Ok(())
+    }
+}
+
 impl HasTagModel for SqliteStore {
     fn tag_model(&self) -> TagModelService<'_> {
         TagModelService::new(self, &self.models)
@@ -538,93 +636,6 @@ impl HasTagModel for SqliteStore {
 impl NoteStore for SqliteStore {
     crate::note_service_methods!();
     crate::tag_service_methods!();
-
-    fn touch_user(&self, id: &str, display_name: Option<&str>, admin: bool) -> Result<User> {
-        let conn = self.conn.lock().unwrap();
-        let t = now();
-        let role = if admin { "admin" } else { "user" };
-        let cur = conn
-            .query_row("SELECT display_name, role, status, created_at, last_seen_at FROM users WHERE id=?1", [id], |r| {
-                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<i64>>(4)?))
-            })
-            .optional()?;
-        let Some((name, cur_role, status, created_at, seen)) = cur else {
-            conn.execute(
-                "INSERT INTO users(id, display_name, role, status, created_at, last_seen_at) VALUES(?1, ?2, ?3, 'active', ?4, ?4)",
-                params![id, display_name, role, t],
-            )?;
-            return Ok(User { id: id.into(), display_name: display_name.map(String::from), role: role.into(), status: "active".into(), created_at: t, last_seen_at: Some(t) });
-        };
-        let new_name = display_name.map(String::from).or(name.clone());
-        let active = status == "active";
-        let stale = seen.map_or(true, |s| t - s >= 300);
-        let last_seen = if active && stale { Some(t) } else { seen };
-        if cur_role != role || new_name != name || last_seen != seen {
-            conn.execute("UPDATE users SET display_name=?1, role=?2, last_seen_at=?3 WHERE id=?4", params![new_name, role, last_seen, id])?;
-        }
-        Ok(User { id: id.into(), display_name: new_name, role: role.into(), status, created_at, last_seen_at: last_seen })
-    }
-
-    fn list_users(&self) -> Result<Vec<UserSummary>> {
-        let conn = self.conn.lock().unwrap();
-        let mut st = conn.prepare(
-            "SELECT u.id, u.display_name, u.role, u.status, u.created_at, u.last_seen_at,
-                    (SELECT COUNT(*) FROM notes n WHERE n.owner = u.id),
-                    (SELECT COUNT(*) FROM attachments a WHERE a.owner = u.id),
-                    (SELECT COALESCE(SUM(a.bytes), 0) FROM attachments a WHERE a.owner = u.id)
-             FROM users u ORDER BY u.created_at, u.id",
-        )?;
-        let rows = st
-            .query_map([], |r| {
-                Ok(UserSummary {
-                    user: User { id: r.get(0)?, display_name: r.get(1)?, role: r.get(2)?, status: r.get(3)?, created_at: r.get(4)?, last_seen_at: r.get(5)? },
-                    notes: r.get(6)?,
-                    attachments: r.get(7)?,
-                    storage_bytes: r.get(8)?,
-                })
-            })?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
-    }
-
-    fn set_user_active(&self, id: &str, active: bool) -> Result<User> {
-        let conn = self.conn.lock().unwrap();
-        let n = conn.execute("UPDATE users SET status=?1 WHERE id=?2", params![if active { "active" } else { "disabled" }, id])?;
-        if n == 0 {
-            return Err(StoreError::NotFound);
-        }
-        conn.query_row("SELECT id, display_name, role, status, created_at, last_seen_at FROM users WHERE id=?1", [id], |r| {
-            Ok(User { id: r.get(0)?, display_name: r.get(1)?, role: r.get(2)?, status: r.get(3)?, created_at: r.get(4)?, last_seen_at: r.get(5)? })
-        })
-        .map_err(Into::into)
-    }
-
-    fn delete_user(&self, id: &str) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
-        let exists: i64 = conn.query_row("SELECT COUNT(*) FROM users WHERE id=?1", [id], |r| r.get(0))?;
-        if exists == 0 {
-            return Err(StoreError::NotFound);
-        }
-        let keys: Vec<String> = {
-            let mut st = conn.prepare("SELECT blob_key, thumb_key FROM attachments WHERE owner=?1")?;
-            let rows: Vec<(String, Option<String>)> = st.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
-            let mut keys: Vec<String> = rows.into_iter().flat_map(|(a, b)| std::iter::once(a).chain(b)).collect();
-            keys.sort();
-            keys.dedup();
-            keys
-        };
-        let tx = conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM notes_fts WHERE rowid IN (SELECT id FROM notes WHERE owner=?1)", [id])?;
-        tx.execute("DELETE FROM notes WHERE owner=?1", [id])?; // tags and attachments follow by foreign key
-        tx.execute("DELETE FROM attachments WHERE owner=?1", [id])?;
-        tx.execute("DELETE FROM tag_rules WHERE owner=?1", [id])?;
-        tx.execute("DELETE FROM suggestion_events WHERE owner=?1", [id])?;
-        tx.execute("DELETE FROM users WHERE id=?1", [id])?;
-        tx.commit()?;
-        self.models.forget(id);
-        self.bump_versions([id.to_string()]);
-        Ok(keys)
-    }
 
 }
 
@@ -677,7 +688,7 @@ mod tests {
             c.execute_batch("DROP TABLE users;").unwrap(); // a database from before accounts existed
         }
         let s = SqliteStore::open(p).unwrap();
-        let ids: Vec<String> = s.list_users().unwrap().into_iter().map(|u| u.user.id).collect();
+        let ids: Vec<String> = s.list_accounts().unwrap().into_iter().map(|u| u.id).collect();
         assert_eq!(ids, vec!["local".to_string(), "rules-only".to_string()]);
         drop(s);
         let _ = std::fs::remove_file(&path);
