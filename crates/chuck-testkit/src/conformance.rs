@@ -2,22 +2,22 @@
 //! ownership, limits, accounts) in terms of the trait only, so any backend can be checked by pointing a test at it:
 //!
 //! ```ignore
-//! fn make() -> Arc<dyn NoteStore> { Arc::new(MyStore::open_empty()) }
+//! fn make() -> Arc<dyn Store> { Arc::new(MyStore::open_empty()) }
 //! chuck::conformance::run_all(&make);
 //! ```
 //!
 //! `tests/store_conformance.rs` runs each case separately against SQLite. A meta-test there fails if a case is added
 //! here and not listed there. Backend-specific checks (migrations, file formats) stay with the backend.
 
-use crate::auth::Identity;
-use crate::blob::{BlobStore, MemBlobStore};
-use crate::control::{AccountRecords, AccountService, AccountStatus, OwnerPurger, OwnerRecords, Role};
-use crate::store::*;
+use chuck_core::model::Identity;
+use chuck_data::blob::{BlobStore, MemBlobStore};
+use chuck_control::{AccountRecords, AccountService, AccountStatus, OwnerPurger, OwnerRecords, Role, Store};
+use chuck_data::store::*;
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Makes a new, empty store for one case.
-pub type Make = dyn Fn() -> Arc<dyn NoteStore>;
+pub type Make = dyn Fn() -> Arc<dyn Store>;
 
 /// All cases: cards, tags, rules, attachments, tag suggestions and accounts. What the services provide over any backend.
 pub fn run_notes(make: &Make) {
@@ -357,7 +357,7 @@ pub fn account_lifecycle(make: &Make) {
     assert!(s.list("alice", &NoteQuery::default()).unwrap().is_empty());
 }
 
-fn accounts_for(s: &Arc<dyn NoteStore>, admins: impl IntoIterator<Item = impl Into<String>>) -> (AccountService, Arc<MemBlobStore>) {
+fn accounts_for(s: &Arc<dyn Store>, admins: impl IntoIterator<Item = impl Into<String>>) -> (AccountService, Arc<MemBlobStore>) {
     let blobs = Arc::new(MemBlobStore::new());
     let records: Arc<dyn OwnerRecords> = s.clone();
     let data = Arc::new(OwnerPurger::new(records, blobs.clone()));
@@ -503,11 +503,11 @@ pub fn ownership_is_checked_first(make: &Make) {
 pub fn rule_cap(make: &Make) {
     let s = make();
     let first = s.add_rule("me", "k0", "t0").unwrap();
-    for i in 1..crate::service::MAX_RULES {
+    for i in 1..chuck_data::service::MAX_RULES {
         s.add_rule("me", &format!("k{i}"), "t").unwrap();
     }
     assert!(matches!(s.add_rule("me", "over", "t"), Err(StoreError::Invalid(_))));
-    assert_eq!(s.rules("me").unwrap().len(), crate::service::MAX_RULES);
+    assert_eq!(s.rules("me").unwrap().len(), chuck_data::service::MAX_RULES);
     s.add_rule("you", "mine", "t").unwrap();
     s.delete_rule("me", first.id).unwrap();
     s.add_rule("me", "again", "t").unwrap();

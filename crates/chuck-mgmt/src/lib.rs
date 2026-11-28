@@ -4,10 +4,10 @@
 //! `BlobStore`. It never reads cards. Rules that protect accounts (an administrator cannot disable or delete their own
 //! account here) live in this service, not in the HTTP handlers, so every host that serves it applies them.
 
-use crate::blob::BlobStore;
-use crate::control::{AccountService, OwnerRecords, Principal};
-use crate::service::system_now;
-use crate::store::{StoreError, User, UserSummary};
+use chuck_data::blob::BlobStore;
+use chuck_control::{AccountService, OwnerRecords, Principal};
+use chuck_data::service::system_now;
+use chuck_data::store::{StoreError, User, UserSummary};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ pub struct SweepReport {
 /// Order matters: the files are listed first and the references read second, so a file stored after the listing is never
 /// considered, and one stored before it but not yet attached is protected by its fresh modified time. The modified time
 /// is checked once more just before each delete.
-pub fn sweep_orphans(records: &dyn OwnerRecords, blobs: &dyn BlobStore, grace_secs: i64, now: i64) -> crate::store::Result<SweepReport> {
+pub fn sweep_orphans(records: &dyn OwnerRecords, blobs: &dyn BlobStore, grace_secs: i64, now: i64) -> chuck_data::store::Result<SweepReport> {
     let files = blobs.list().map_err(|e| StoreError::Other(format!("listing files: {e}")))?;
     let referenced: HashSet<String> = records.all_blob_keys()?.into_iter().collect();
     let mut report = SweepReport { scanned: files.len(), ..Default::default() };
@@ -144,7 +144,7 @@ impl AdminService {
     }
 
     /// The scheduled form of the sweep, which has no human caller.
-    pub fn sweep_unattended(&self, grace_secs: i64) -> crate::store::Result<SweepReport> {
+    pub fn sweep_unattended(&self, grace_secs: i64) -> chuck_data::store::Result<SweepReport> {
         sweep_orphans(&*self.records, &*self.blobs, grace_secs, (self.now)())
     }
 }

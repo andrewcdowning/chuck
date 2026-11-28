@@ -157,5 +157,5 @@ Rules for a provider:
 
 ## Adding a built-in provider to this repo
 
-Create `src/auth/<name>.rs`, implement `Authenticator`, and add a branch in `from_env` in `src/auth/mod.rs`. See `jwt.rs`
+Create `crates/chuck-http/src/auth/<name>.rs`, implement `Authenticator`, and add a branch in `from_env` in `crates/chuck-http/src/auth/mod.rs`. See `jwt.rs`
 for a pattern that tests with a throwaway signing key.

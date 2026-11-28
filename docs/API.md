@@ -2,7 +2,7 @@
 
 The HTTP API is described by a [Smithy](https://smithy.io) model in `smithy/model/` (protocol `restJson1`), split into
 one service per plane (see [specs/service-layer.md](specs/service-layer.md)). The server is still hand-written axum code
-in `src/api.rs`; the model is the written contract, not a code generator.
+in `crates/chuck-http/src/api.rs`; the model is the written contract, not a code generator.
 
 | Service | Plane | Who calls it | Model file | Router function | OpenAPI document |
 | --- | --- | --- | --- | --- | --- |

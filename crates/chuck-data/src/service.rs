@@ -3,11 +3,11 @@
 //! Everything a user can observe about these operations is decided here (or in `domain`): what an update means, which
 //! errors are the client's fault, how cards are ordered and placed, what a search matches. Backends only store records.
 
-use crate::domain::card::{card_kind, open_items, tags_for};
-use crate::domain::input;
-use crate::domain::order::{self, Place};
-use crate::domain::schedule::{self, ScheduleInput};
-use crate::domain::search;
+use chuck_core::domain::card::{card_kind, open_items, tags_for};
+use chuck_core::domain::input;
+use chuck_core::domain::order::{self, Place};
+use chuck_core::domain::schedule::{self, ScheduleInput};
+use chuck_core::domain::search;
 use crate::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
 use crate::store::*;
 use std::time::{SystemTime, UNIX_EPOCH};

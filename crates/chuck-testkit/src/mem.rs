@@ -7,12 +7,12 @@
 //!
 //! `MemStore` implements all of `NoteStore`, accounts included, so every conformance case runs on it.
 
-use crate::control::{AccountRecords, OwnerRecords, Usage};
-use crate::domain::order::Slot;
-use crate::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
-use crate::service::HasRecords;
-use crate::store::*;
-use crate::tagmodel::{FeedbackCount, HasTagModel, ModelCache, TagModelService, TagSource};
+use chuck_control::{AccountRecords, OwnerRecords, Usage};
+use chuck_core::domain::order::Slot;
+use chuck_data::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
+use chuck_data::service::HasRecords;
+use chuck_data::store::*;
+use chuck_data::tagmodel::{FeedbackCount, HasTagModel, ModelCache, TagModelService, TagSource};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 
@@ -233,7 +233,7 @@ impl RecordTx for MemTx<'_> {
             duration_ms: a.duration_ms,
             name: a.name.clone(),
             has_thumb: false,
-            v: crate::blob::attachment_version(&a.blob_key, None),
+            v: chuck_data::blob::attachment_version(&a.blob_key, None),
             blob_key: a.blob_key.clone(),
             thumb_key: None,
         };
@@ -250,7 +250,7 @@ impl RecordTx for MemTx<'_> {
             Some((o, _, a)) if o == owner => {
                 let old = a.thumb_key.replace(thumb_key.to_string());
                 a.has_thumb = true;
-                a.v = crate::blob::attachment_version(&a.blob_key, a.thumb_key.as_deref());
+                a.v = chuck_data::blob::attachment_version(&a.blob_key, a.thumb_key.as_deref());
                 Ok(old)
             }
             _ => Err(StoreError::NotFound),
@@ -441,8 +441,8 @@ impl HasRecords for MemStore {
 }
 
 impl NoteStore for MemStore {
-    crate::note_service_methods!();
-    crate::tag_service_methods!();
+    chuck_data::note_service_methods!();
+    chuck_data::tag_service_methods!();
 }
 
 impl AccountRecords for MemStore {

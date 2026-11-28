@@ -20,12 +20,7 @@ use std::sync::Arc;
 
 pub use simple::{ct_eq, LocalUser, StaticToken, TrustedHeader};
 
-/// Who a request is from: the owner id, plus a display name when the identity provider has one.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Identity {
-    pub id: String,
-    pub name: Option<String>,
-}
+pub use chuck_core::model::Identity;
 
 pub trait Authenticator: Send + Sync + 'static {
     /// Returns the owner id for the request, or None to reject with 401.

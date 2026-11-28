@@ -1,0 +1,10 @@
+[package]
+name = "chuck-control"
+version = "0.1.0"
+edition = "2021"
+description = "Chuck control plane: accounts and principals."
+publish = false
+
+[dependencies]
+chuck-core = { path = "../chuck-core" }
+chuck-data = { path = "../chuck-data" }

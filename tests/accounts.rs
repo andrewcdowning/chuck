@@ -5,7 +5,7 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use chuck::auth::{Authenticator, Identity};
 use chuck::blob::MemBlobStore;
 use chuck::control::{AccountRecords, AccountService, AccountStatus, OwnerData, OwnerPurger, OwnerRecords, Usage};
-use chuck::mem::MemStore;
+use chuck_testkit::mem::MemStore;
 use chuck::sqlite::SqliteStore;
 use chuck::store::{NoteInput, NoteStore, StoreError, User};
 use chuck::api;

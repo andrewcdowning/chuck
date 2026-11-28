@@ -1,11 +1,11 @@
 //! Runs the backend-neutral store contract (`src/conformance.rs`) against SQLite, one test per case.
 
-use chuck::conformance as c;
+use chuck_testkit::conformance as c;
 use chuck::sqlite::SqliteStore;
-use chuck::store::NoteStore;
+use chuck::control::Store;
 use std::sync::Arc;
 
-fn make() -> Arc<dyn NoteStore> {
+fn make() -> Arc<dyn Store> {
     Arc::new(SqliteStore::open(":memory:").unwrap())
 }
 
@@ -20,7 +20,7 @@ cases!(crud_tags_and_isolation, reminders, todo_cards_pin_and_due, auto_tag_rule
 
 #[test]
 fn every_conformance_case_is_listed() {
-    let src = include_str!("../src/conformance.rs");
+    let src = include_str!("../crates/chuck-testkit/src/conformance.rs");
     let defined: Vec<&str> = src
         .lines()
         .filter_map(|l| l.strip_prefix("pub fn "))

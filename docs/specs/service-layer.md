@@ -1,6 +1,6 @@
 # Spec: service layer and the three planes
 
-Status: approved. Decisions D1 to D6 were taken as recommended. Phases 0 to 5 are built (PRs #21 to #26) and phase 6 is in progress; phase 7 is not.
+Status: approved. Decisions D1 to D6 were taken as recommended. All phases (0 to 7) are built (PRs #21 to #28, and the Smithy split in #27). The packages follow the table below, with the differences noted under it.
 
 Fixes findings A1 to A7 and B1 to B8 in [../ARCHITECTURE-REVIEW.md](../ARCHITECTURE-REVIEW.md), and prepares the split into
 packages needed for API Gateway and Lambda.
@@ -128,6 +128,22 @@ Target layout (a Cargo workspace), reached in the last phase:
 | `chuck-store-sqlite` | Implements all store traits | core, data, control |
 | `chuck-http` | Router, auth middleware, `Principal` resolution; axum host | all services |
 | `chuck-lambda` (later) | Lambda handlers per plane, authorizer | services, a cloud store crate |
+
+### As built
+
+The workspace follows the table, with these differences:
+
+- `chuck-mgmt` holds the admin service and the sweeper but not the command-line tool. `eval-tags` opens a concrete backend
+  (SQLite), so it stays in the top-level `chuck` package, which is also the binary.
+- `chuck-testkit` is new: the conformance suite and the in-memory backend. It is used by tests only.
+- `OwnerRecords` and `Usage` (what the data plane tells the control plane) are in `chuck-data`, which keeps `chuck-data`
+  free of any dependency on `chuck-control`. `chuck-control` re-exports them and defines `Store`, the trait that combines
+  `NoteStore`, `AccountRecords` and `OwnerRecords`; servers and the HTTP edge are built on `dyn Store`.
+- `Principal` is defined in `chuck-control`, so the HTTP extractor is a wrapper, `chuck_http::api::Authed`.
+- `chuck-core` also holds the byte-level helpers (`media`, `export`, `zip`) and `tagging`, which depend on nothing.
+- The top-level `chuck` package re-exports the old module paths (`chuck::store`, `chuck::api`, `chuck::sqlite`, ...).
+- `tests/workspace.rs` fails if a crate gains a dependency that is not in the table, or if `chuck-core`, `chuck-data`,
+  `chuck-control` or `chuck-mgmt` start using a web or database library.
 
 ## Phases
 

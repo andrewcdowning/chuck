@@ -21,7 +21,7 @@ mod tests {
             ("search.rs", include_str!("search.rs")),
         ];
         for (name, src) in files {
-            for banned in ["crate::store", "crate::sqlite", "crate::api", "rusqlite", "axum", "crate::auth", "SystemTime"] {
+            for banned in ["crate::model", "crate::sqlite", "crate::api", "rusqlite", "axum", "crate::auth", "SystemTime"] {
                 assert!(!src.contains(banned), "domain/{name} must not use {banned}");
             }
         }

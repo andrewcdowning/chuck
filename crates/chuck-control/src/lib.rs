@@ -9,12 +9,20 @@
 //! request), then everything it owns is purged from the data plane, and only then is the account record removed. If the
 //! purge fails the account stays `deleting` and the same call can be repeated.
 
-use crate::auth::Identity;
-use crate::blob::BlobStore;
-use crate::store::{Result, StoreError, User, UserSummary};
+use chuck_core::model::Identity;
+use chuck_data::blob::BlobStore;
+use chuck_data::store::{Result, StoreError, User, UserSummary};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+pub use chuck_data::owner::{OwnerRecords, Usage};
+
+/// A complete storage backend: the data plane's `NoteStore` plus the control plane's account records plus what the data
+/// plane tells the control plane about an owner. This is what the HTTP edge and the server are built on; it is implemented
+/// automatically for anything that has all three.
+pub trait Store: chuck_data::store::NoteStore + AccountRecords + OwnerRecords {}
+impl<T: chuck_data::store::NoteStore + AccountRecords + OwnerRecords> Store for T {}
 
 /// How long a resolved account is reused before the account record is read again.
 pub const DEFAULT_ACCOUNT_CACHE: Duration = Duration::from_secs(30);
@@ -106,26 +114,6 @@ pub trait AccountRecords: Send + Sync + 'static {
     fn remove_account(&self, id: &str) -> Result<bool>;
 }
 
-/// What an owner uses. Counts and sizes only; never content.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Usage {
-    pub notes: i64,
-    pub attachments: i64,
-    pub storage_bytes: i64,
-}
-
-/// What the data plane's storage offers the control plane. Implemented by the backend that holds the owner's records.
-pub trait OwnerRecords: Send + Sync + 'static {
-    fn usage(&self, owner: &str) -> Result<Usage>;
-    /// Storage keys of all of the owner's files and previews, without duplicates.
-    fn blob_keys(&self, owner: &str) -> Result<Vec<String>>;
-    /// Storage keys used by anyone's files and previews. What the orphan sweeper treats as in use.
-    fn all_blob_keys(&self) -> Result<Vec<String>>;
-    /// Removes everything the owner has from the data plane (cards, tags, attachments, rules, suggestion feedback) and
-    /// forgets anything derived from it. Does nothing if there is nothing left. Does not touch the account record.
-    fn purge_rows(&self, owner: &str) -> Result<()>;
-}
-
 /// The data plane as the control plane sees it: usage, and erasing an owner completely (files included).
 pub trait OwnerData: Send + Sync + 'static {
     fn usage(&self, owner: &str) -> Result<Usage>;
@@ -177,7 +165,7 @@ const MAX_CACHED: usize = 10_000;
 
 impl AccountService {
     pub fn new(accounts: Arc<dyn AccountRecords>, data: Arc<dyn OwnerData>) -> Self {
-        Self { accounts, data, admins: HashSet::new(), ttl: DEFAULT_ACCOUNT_CACHE, cache: Mutex::new(HashMap::new()), now: crate::service::system_now }
+        Self { accounts, data, admins: HashSet::new(), ttl: DEFAULT_ACCOUNT_CACHE, cache: Mutex::new(HashMap::new()), now: chuck_data::service::system_now }
     }
 
     /// Ids that are administrators. The configuration is authoritative: roles are synced from it on every sign-in.

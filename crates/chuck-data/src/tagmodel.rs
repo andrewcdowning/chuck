@@ -4,9 +4,9 @@
 //! no storage backend has to know any of it. A backend only answers a few plain questions: the text of an owner's cards,
 //! their rules, their feedback, and a version number that changes when their card text changes.
 
-use crate::domain::card::{extract_tags, tags_for};
+use chuck_core::domain::card::{extract_tags, tags_for};
 use crate::store::{FeedbackEvent, Result};
-use crate::tagging::{feedback_offset, strip_hashtags, Doc, Model, SuggestionSet, MIN_DOCS_TO_CALIBRATE};
+use chuck_core::tagging::{feedback_offset, strip_hashtags, Doc, Model, SuggestionSet, MIN_DOCS_TO_CALIBRATE};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

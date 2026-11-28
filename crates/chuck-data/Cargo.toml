@@ -1,0 +1,12 @@
+[package]
+name = "chuck-data"
+version = "0.1.0"
+edition = "2021"
+description = "Chuck data plane: services over thin storage traits."
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+chuck-core = { path = "../chuck-core" }

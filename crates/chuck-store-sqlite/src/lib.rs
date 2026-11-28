@@ -1,9 +1,9 @@
-use crate::control::{AccountRecords, OwnerRecords, Usage};
-use crate::domain::order::Slot;
-use crate::domain::schedule::Schedule;
-use crate::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
-use crate::store::*;
-use crate::tagmodel::{FeedbackCount, HasTagModel, ModelCache, TagModelService, TagSource};
+use chuck_control::{AccountRecords, OwnerRecords, Usage};
+use chuck_core::domain::order::Slot;
+use chuck_core::domain::schedule::Schedule;
+use chuck_data::records::{NoteRecord, NoteRecords, RecordQuery, RecordTx};
+use chuck_data::store::*;
+use chuck_data::tagmodel::{FeedbackCount, HasTagModel, ModelCache, TagModelService, TagSource};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -219,7 +219,7 @@ fn attachment_row(r: &rusqlite::Row) -> rusqlite::Result<Attachment> {
         duration_ms: r.get(9)?,
         name: r.get(6)?,
         has_thumb: thumb_key.is_some(),
-        v: crate::blob::attachment_version(&blob_key, thumb_key.as_deref()),
+        v: chuck_data::blob::attachment_version(&blob_key, thumb_key.as_deref()),
         blob_key,
         thumb_key,
     })
@@ -490,7 +490,7 @@ impl RecordTx for SqliteTx<'_> {
     }
 }
 
-impl crate::service::HasRecords for SqliteStore {
+impl chuck_data::service::HasRecords for SqliteStore {
     type R = SqliteStore;
     fn records(&self) -> &SqliteStore {
         self
@@ -671,8 +671,8 @@ impl HasTagModel for SqliteStore {
 }
 
 impl NoteStore for SqliteStore {
-    crate::note_service_methods!();
-    crate::tag_service_methods!();
+    chuck_data::note_service_methods!();
+    chuck_data::tag_service_methods!();
 
 }
 

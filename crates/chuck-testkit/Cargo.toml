@@ -1,0 +1,12 @@
+[package]
+name = "chuck-testkit"
+version = "0.1.0"
+edition = "2021"
+description = "Chuck test support: conformance suite and in-memory backend."
+publish = false
+
+[dependencies]
+serde_json = { workspace = true }
+chuck-core = { path = "../chuck-core" }
+chuck-data = { path = "../chuck-data" }
+chuck-control = { path = "../chuck-control" }

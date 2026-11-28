@@ -1,7 +1,7 @@
 //! When tag models are rebuilt. One user's edits must not make anyone else's model retrain (they used to, through a
 //! single global counter), and the cache must stay bounded however many users there are.
 
-use chuck::mem::MemStore;
+use chuck_testkit::mem::MemStore;
 use chuck::service::HasRecords;
 use chuck::sqlite::SqliteStore;
 use chuck::store::{NoteInput, NoteStore};

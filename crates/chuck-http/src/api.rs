@@ -1,10 +1,10 @@
 use crate::auth::Authenticator;
-use crate::admin::{AdminError, AdminService};
-use crate::blob::{self, BlobStore};
-use crate::control::{AccountRecords, AccountService, AccountStatus, OwnerPurger, OwnerRecords, Principal, DEFAULT_ACCOUNT_CACHE};
-use crate::media::{self, MediaError};
-use crate::store::{normalize_tag, NewAttachment, NoteInput, NoteQuery, NoteStore, RuleInput, StoreError};
-use crate::domain::input::{self, clean_name, InputError, MAX_BODY};
+use chuck_mgmt::{AdminError, AdminService};
+use chuck_data::blob::{self, BlobStore};
+use chuck_control::{AccountRecords, AccountService, AccountStatus, OwnerPurger, OwnerRecords, Principal, Store, DEFAULT_ACCOUNT_CACHE};
+use chuck_core::media::{self, MediaError};
+use chuck_data::store::{normalize_tag, NewAttachment, NoteInput, NoteQuery, RuleInput, StoreError};
+use chuck_core::domain::input::{self, clean_name, InputError, MAX_BODY};
 use serde::Deserialize;
 use axum::{
     body::Bytes,
@@ -20,7 +20,7 @@ use std::time::Duration;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<dyn NoteStore>,
+    pub store: Arc<dyn Store>,
     pub auth: Arc<dyn Authenticator>,
     pub blobs: Arc<dyn BlobStore>,
     /// The control plane: resolves identities to accounts and manages their lifecycle.
@@ -33,7 +33,7 @@ pub struct AppState {
 
 impl AppState {
     /// No administrators; account status is cached for `control::DEFAULT_ACCOUNT_CACHE`.
-    pub fn new(store: Arc<dyn NoteStore>, auth: Arc<dyn Authenticator>, blobs: Arc<dyn BlobStore>) -> Self {
+    pub fn new(store: Arc<dyn Store>, auth: Arc<dyn Authenticator>, blobs: Arc<dyn BlobStore>) -> Self {
         let admins = Arc::new(HashSet::new());
         let (accounts, admin) = Self::build(&store, &blobs, &admins, DEFAULT_ACCOUNT_CACHE);
         Self { store, auth, blobs, accounts, admin, admins, account_cache: DEFAULT_ACCOUNT_CACHE }
@@ -53,7 +53,7 @@ impl AppState {
         self
     }
 
-    fn build(store: &Arc<dyn NoteStore>, blobs: &Arc<dyn BlobStore>, admins: &HashSet<String>, ttl: Duration) -> (Arc<AccountService>, Arc<AdminService>) {
+    fn build(store: &Arc<dyn Store>, blobs: &Arc<dyn BlobStore>, admins: &HashSet<String>, ttl: Duration) -> (Arc<AccountService>, Arc<AdminService>) {
         let accounts: Arc<dyn AccountRecords> = store.clone();
         let records: Arc<dyn OwnerRecords> = store.clone();
         let data = Arc::new(OwnerPurger::new(records.clone(), blobs.clone()));
@@ -75,7 +75,7 @@ async fn require_principal(axum::extract::State(s): axum::extract::State<AppStat
     // Authentication may fetch signing keys over the network, and the account may be read or created, so this runs on a
     // blocking thread.
     let (auth, accounts, headers) = (s.auth.clone(), s.accounts.clone(), req.headers().clone());
-    let found = tokio::task::spawn_blocking(move || -> crate::store::Result<Option<Principal>> {
+    let found = tokio::task::spawn_blocking(move || -> chuck_data::store::Result<Option<Principal>> {
         let Some(who) = auth.identity(&headers) else { return Ok(None) };
         accounts.resolve(&who).map(Some)
     })
@@ -98,12 +98,16 @@ async fn require_principal(axum::extract::State(s): axum::extract::State<AppStat
     next.run(req).await
 }
 
+/// The signed-in account for this request, as set by `require_principal`. A handler that takes `Authed` can only run for
+/// an authenticated, active account (and, under /api/admin, an administrator).
+pub struct Authed(pub Principal);
+
 #[axum::async_trait]
-impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Principal {
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Authed {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut axum::http::request::Parts, _: &S) -> Result<Self, Self::Rejection> {
-        parts.extensions.get::<Principal>().cloned().ok_or(ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()))
+        parts.extensions.get::<Principal>().cloned().map(Authed).ok_or(ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()))
     }
 }
 
@@ -206,7 +210,7 @@ impl From<StoreError> for ApiError {
     }
 }
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> crate::store::Result<T> + Send + 'static) -> Result<T, ApiError> {
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> chuck_data::store::Result<T> + Send + 'static) -> Result<T, ApiError> {
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -229,7 +233,7 @@ struct CreateQuery {
     media: Option<bool>,
 }
 
-async fn create(State(s): State<AppState>, p: Principal, Query(q): Query<CreateQuery>, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
+async fn create(State(s): State<AppState>, Authed(p): Authed, Query(q): Query<CreateQuery>, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let input = validate(b, q.media.unwrap_or(false))?;
     let st = s.store.clone();
@@ -237,7 +241,7 @@ async fn create(State(s): State<AppState>, p: Principal, Query(q): Query<CreateQ
     Ok((StatusCode::CREATED, Json(n)))
 }
 
-async fn update(State(s): State<AppState>, p: Principal, Path(id): Path<i64>, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
+async fn update(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>, Json(b): Json<NoteInput>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     let has_media = {
@@ -248,7 +252,7 @@ async fn update(State(s): State<AppState>, p: Principal, Path(id): Path<i64>, Js
     Ok(Json(blocking(move || st.update(&o, id, &input)).await?))
 }
 
-async fn remove(State(s): State<AppState>, p: Principal, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
+async fn remove(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     // The files go with the card's last use; the sweeper deletes them once nothing refers to them.
@@ -256,13 +260,13 @@ async fn remove(State(s): State<AppState>, p: Principal, Path(id): Path<i64>) ->
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list(State(s): State<AppState>, p: Principal, Query(q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
+async fn list(State(s): State<AppState>, Authed(p): Authed, Query(q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     Ok(Json(serde_json::json!({ "notes": blocking(move || st.list(&o, &q)).await? })))
 }
 
-async fn tags(State(s): State<AppState>, p: Principal) -> Result<impl IntoResponse, ApiError> {
+async fn tags(State(s): State<AppState>, Authed(p): Authed) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     Ok(Json(serde_json::json!({ "tags": blocking(move || st.tags(&o)).await? })))
@@ -273,7 +277,7 @@ struct SuggestInput {
     text: String,
 }
 
-async fn suggest(State(s): State<AppState>, p: Principal, Json(b): Json<SuggestInput>) -> Result<impl IntoResponse, ApiError> {
+async fn suggest(State(s): State<AppState>, Authed(p): Authed, Json(b): Json<SuggestInput>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let text: String = b.text.chars().take(MAX_BODY).collect();
     let st = s.store.clone();
@@ -288,7 +292,7 @@ struct FeedbackInput {
     confidence: Option<f64>,
 }
 
-async fn suggestion_feedback(State(s): State<AppState>, p: Principal, Json(b): Json<FeedbackInput>) -> Result<impl IntoResponse, ApiError> {
+async fn suggestion_feedback(State(s): State<AppState>, Authed(p): Authed, Json(b): Json<FeedbackInput>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let tag = normalize_tag(&b.tag).ok_or(ApiError(StatusCode::BAD_REQUEST, "invalid tag".into()))?;
     let accepted = match b.action.as_str() {
@@ -302,13 +306,13 @@ async fn suggestion_feedback(State(s): State<AppState>, p: Principal, Json(b): J
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn rules(State(s): State<AppState>, p: Principal) -> Result<impl IntoResponse, ApiError> {
+async fn rules(State(s): State<AppState>, Authed(p): Authed) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     Ok(Json(serde_json::json!({ "rules": blocking(move || st.rules(&o)).await? })))
 }
 
-async fn add_rule(State(s): State<AppState>, p: Principal, Json(b): Json<RuleInput>) -> Result<impl IntoResponse, ApiError> {
+async fn add_rule(State(s): State<AppState>, Authed(p): Authed, Json(b): Json<RuleInput>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let pattern = b.pattern.trim().to_string();
     if pattern.is_empty() || pattern.chars().count() > 200 || !pattern.split(|c| c == '|' || c == ',').any(|k| !k.trim().is_empty()) {
@@ -320,14 +324,14 @@ async fn add_rule(State(s): State<AppState>, p: Principal, Json(b): Json<RuleInp
     Ok((StatusCode::CREATED, Json(r)))
 }
 
-async fn delete_rule(State(s): State<AppState>, p: Principal, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
+async fn delete_rule(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     blocking(move || st.delete_rule(&o, id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn apply_rules(State(s): State<AppState>, p: Principal) -> Result<impl IntoResponse, ApiError> {
+async fn apply_rules(State(s): State<AppState>, Authed(p): Authed) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     let changed = blocking(move || st.apply_rules(&o)).await?;
@@ -335,7 +339,7 @@ async fn apply_rules(State(s): State<AppState>, p: Principal) -> Result<impl Int
 }
 
 /// Markdown download of every note (or the notes matching the same filters as `/api/notes`; paging is ignored).
-async fn export(State(s): State<AppState>, p: Principal, Query(mut q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
+async fn export(State(s): State<AppState>, Authed(p): Authed, Query(mut q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     let notes = blocking(move || {
@@ -356,8 +360,8 @@ async fn export(State(s): State<AppState>, p: Principal, Query(mut q): Query<Not
     })
     .await?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    let body = crate::export::to_markdown(&notes, now);
-    let disposition = format!("attachment; filename=\"chuck-export-{}.md\"", crate::export::fmt_date(now));
+    let body = chuck_core::export::to_markdown(&notes, now);
+    let disposition = format!("attachment; filename=\"chuck-export-{}.md\"", chuck_core::export::fmt_date(now));
     Ok((
         [
             (axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8".to_string()),
@@ -391,7 +395,7 @@ struct AttachQuery {
 }
 
 /// Body: the raw file. The type is detected from the bytes; metadata is stripped before storing.
-async fn add_attachment(State(s): State<AppState>, p: Principal, Path(note_id): Path<i64>, Query(q): Query<AttachQuery>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
+async fn add_attachment(State(s): State<AppState>, Authed(p): Authed, Path(note_id): Path<i64>, Query(q): Query<AttachQuery>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
     let name = clean_name(q.name);
@@ -427,7 +431,7 @@ async fn add_attachment(State(s): State<AppState>, p: Principal, Path(note_id): 
 }
 
 /// Body: a small preview image for the attachment, made by the client.
-async fn put_thumb(State(s): State<AppState>, p: Principal, Path(id): Path<i64>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
+async fn put_thumb(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>, body: Bytes) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
     tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
@@ -454,7 +458,7 @@ struct MediaQuery {
     v: Option<String>,
 }
 
-async fn get_media(State(s): State<AppState>, p: Principal, h: HeaderMap, Path(id): Path<i64>, Query(q): Query<MediaQuery>) -> Result<Response, ApiError> {
+async fn get_media(State(s): State<AppState>, Authed(p): Authed, h: HeaderMap, Path(id): Path<i64>, Query(q): Query<MediaQuery>) -> Result<Response, ApiError> {
     let o = p.id.clone();
     let if_none_match = h.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_string);
     let wanted_v = q.v.clone();
@@ -513,7 +517,7 @@ async fn get_media(State(s): State<AppState>, p: Principal, h: HeaderMap, Path(i
     Ok(resp)
 }
 
-async fn delete_media(State(s): State<AppState>, p: Principal, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
+async fn delete_media(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     blocking(move || st.delete_attachment(&o, id).map(|_| ())).await?;
@@ -528,7 +532,7 @@ struct MoveInput {
     next: Option<i64>,
 }
 
-async fn move_note(State(s): State<AppState>, p: Principal, Path(id): Path<i64>, Json(b): Json<MoveInput>) -> Result<impl IntoResponse, ApiError> {
+async fn move_note(State(s): State<AppState>, Authed(p): Authed, Path(id): Path<i64>, Json(b): Json<MoveInput>) -> Result<impl IntoResponse, ApiError> {
     let o = p.id.clone();
     let st = s.store.clone();
     Ok(Json(blocking(move || st.move_note(&o, id, b.prev, b.next)).await?))
@@ -578,14 +582,14 @@ mod range_tests {
 
 // ---------------------------------------------------------------- accounts
 
-async fn me(State(s): State<AppState>, p: Principal) -> Result<impl IntoResponse, ApiError> {
+async fn me(State(s): State<AppState>, Authed(p): Authed) -> Result<impl IntoResponse, ApiError> {
     let accounts = s.accounts.clone();
     Ok(Json(blocking(move || accounts.get(&p.id)).await?))
 }
 
 /// Everything the account owns, as one ZIP: notes (JSON and Markdown), tag rules, suggestion feedback, and the original
 /// files. Built in memory, so for now it is limited to 1 GB of files.
-async fn export_me(State(s): State<AppState>, p: Principal) -> Result<impl IntoResponse, ApiError> {
+async fn export_me(State(s): State<AppState>, Authed(p): Authed) -> Result<impl IntoResponse, ApiError> {
     const MAX_FILES_BYTES: i64 = 1 << 30;
     let o = p.id.clone();
     let (st, blobs) = (s.store.clone(), s.blobs.clone());
@@ -606,13 +610,13 @@ async fn export_me(State(s): State<AppState>, p: Principal) -> Result<impl IntoR
             return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "your files are over 1 GB, too large to download in one piece for now; ask the administrator".into()));
         }
         let zerr = |e: String| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e);
-        let mut z = crate::zip::ZipWriter::new();
+        let mut z = chuck_core::zip::ZipWriter::new();
         z.add("README.txt", format!(
             "Your Chuck data, exported {}.\n\nnotes.json      every card with its tags, dates, reminders and attachment details\nnotes.md        the same cards as readable Markdown\nrules.json      your auto-tag rules\nsuggestion-feedback.json  the tag suggestions you accepted or dismissed\nattachments/    your original pictures and audio, named <id>-<file name>\n",
-            crate::export::fmt_utc(now)
+            chuck_core::export::fmt_utc(now)
         ).as_bytes(), now).map_err(zerr)?;
         z.add("notes.json", &pretty(&notes), now).map_err(zerr)?;
-        z.add("notes.md", crate::export::to_markdown(&notes, now).as_bytes(), now).map_err(zerr)?;
+        z.add("notes.md", chuck_core::export::to_markdown(&notes, now).as_bytes(), now).map_err(zerr)?;
         z.add("rules.json", &pretty(&st.rules(&o)?), now).map_err(zerr)?;
         z.add("suggestion-feedback.json", &pretty(&st.feedback_events(&o)?), now).map_err(zerr)?;
         for a in notes.iter().flat_map(|n| n.attachments.iter()) {
@@ -620,7 +624,7 @@ async fn export_me(State(s): State<AppState>, p: Principal) -> Result<impl IntoR
             let name = clean_name(a.name.clone()).unwrap_or_else(|| "file".into());
             z.add(&format!("attachments/{}-{}", a.id, name.replace('/', "_")), &bytes, now).map_err(zerr)?;
         }
-        Ok((z.finish().map_err(zerr)?, crate::export::fmt_date(now)))
+        Ok((z.finish().map_err(zerr)?, chuck_core::export::fmt_date(now)))
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
@@ -645,7 +649,7 @@ struct ConfirmInput {
 }
 
 /// Deletes the caller's own account and all of its data and files. Signing in again starts a new, empty account.
-async fn delete_me(State(s): State<AppState>, p: Principal, Json(b): Json<ConfirmInput>) -> Result<impl IntoResponse, ApiError> {
+async fn delete_me(State(s): State<AppState>, Authed(p): Authed, Json(b): Json<ConfirmInput>) -> Result<impl IntoResponse, ApiError> {
     if b.confirm != p.id {
         return Err(ApiError(StatusCode::BAD_REQUEST, "type your account name to confirm".into()));
     }
@@ -661,7 +665,7 @@ async fn erase_account(s: &AppState, id: &str) -> Result<(), ApiError> {
 }
 
 /// Accounts with counts and sizes. Never any content.
-async fn admin_users(State(s): State<AppState>, me: Principal) -> Result<impl IntoResponse, ApiError> {
+async fn admin_users(State(s): State<AppState>, Authed(me): Authed) -> Result<impl IntoResponse, ApiError> {
     let admin = s.admin.clone();
     let users = tokio::task::spawn_blocking(move || admin.accounts(&me)).await.map_err(join_error)??;
     Ok(Json(serde_json::json!({ "users": users })))
@@ -673,7 +677,7 @@ struct StatusInput {
     active: bool,
 }
 
-async fn admin_user_status(State(s): State<AppState>, me: Principal, Json(b): Json<StatusInput>) -> Result<impl IntoResponse, ApiError> {
+async fn admin_user_status(State(s): State<AppState>, Authed(me): Authed, Json(b): Json<StatusInput>) -> Result<impl IntoResponse, ApiError> {
     let admin = s.admin.clone();
     Ok(Json(tokio::task::spawn_blocking(move || admin.set_active(&me, &b.id, b.active)).await.map_err(join_error)??))
 }
@@ -684,14 +688,14 @@ struct IdInput {
 }
 
 /// Deletes another account and everything it owns. To keep someone out without deleting, disable the account.
-async fn admin_delete_user(State(s): State<AppState>, me: Principal, Json(b): Json<IdInput>) -> Result<impl IntoResponse, ApiError> {
+async fn admin_delete_user(State(s): State<AppState>, Authed(me): Authed, Json(b): Json<IdInput>) -> Result<impl IntoResponse, ApiError> {
     let admin = s.admin.clone();
     tokio::task::spawn_blocking(move || admin.delete_account(&me, &b.id)).await.map_err(join_error)??;
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// Deletes stored files that no card refers to. Reports counts only.
-async fn admin_sweep(State(s): State<AppState>, me: Principal) -> Result<impl IntoResponse, ApiError> {
+async fn admin_sweep(State(s): State<AppState>, Authed(me): Authed) -> Result<impl IntoResponse, ApiError> {
     let admin = s.admin.clone();
     Ok(Json(tokio::task::spawn_blocking(move || admin.sweep(&me)).await.map_err(join_error)??))
 }
