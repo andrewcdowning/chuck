@@ -1229,7 +1229,7 @@ function attachSuggest(fields, target, box) {
 async function loadRules() {
   const box = $("rulelist");
   let rules;
-  try { rules = await api("/api/rules"); } catch (e) { box.textContent = e.message; return; }
+  try { rules = (await api("/api/rules")).rules; } catch (e) { box.textContent = e.message; return; }
   box.replaceChildren(...(rules.length ? rules.map(r => {
     const chip = el("span", { className: "tag", textContent: "#" + r.tag }); paint(chip, r.tag);
     return el("div", { className: "rule" }, el("span", { className: "kw", textContent: r.pattern }), "→", chip,
@@ -1259,7 +1259,7 @@ const fmtBytes = n => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(0) 
 async function loadUsers() {
   const box = $("userlist");
   let users;
-  try { users = await api("/api/admin/users"); } catch (e) { box.textContent = e.message; return; }
+  try { users = (await api("/api/admin/users")).users; } catch (e) { box.textContent = e.message; return; }
   const post = async (path, body) => { try { await api(path, { method: "POST", body: JSON.stringify(body) }); } catch (e) { $("acct-msg").textContent = e.message; } loadUsers(); };
   box.replaceChildren(...users.map(u => {
     const label = (u.display_name ? u.display_name + " (" + u.id + ")" : u.id) + (u.role === "admin" ? " [admin]" : "") + (u.status !== "active" ? " [disabled]" : "");
@@ -1442,7 +1442,7 @@ async function loadFeed(reset) {
   const mine = ++feedSeq;
   const extra = { limit: PAGE, offset: reset ? 0 : offset };
   if (filter === "@reminders") extra.reminders = "true"; else if (filter) extra.tag = filter;
-  const notes = await api("/api/notes?" + params(extra));
+  const { notes } = await api("/api/notes?" + params(extra));
   if (mine !== feedSeq) return;
   if (reset) {
     liveRecorders.forEach(r => { if (r !== composerRecorder) r.cleanup(); });
@@ -1457,7 +1457,7 @@ async function loadFeed(reset) {
 }
 
 async function loadFilters() {
-  const [tags, rem] = await Promise.all([api("/api/tags"), api("/api/notes?reminders=true&limit=200")]);
+  const [{ tags }, { notes: rem }] = await Promise.all([api("/api/tags"), api("/api/notes?reminders=true&limit=200")]);
   pendingReminders = rem;
   const box = $("tags");
   const mk = (cls, key, label, count, dot) => {
@@ -1497,7 +1497,7 @@ function toast(n) {
   $("toasts").append(t);
 }
 async function checkReminders() {
-  try { pendingReminders = await api("/api/notes?reminders=true&limit=200"); } catch { return; }
+  try { pendingReminders = (await api("/api/notes?reminders=true&limit=200")).notes; } catch { return; }
   const due = pendingReminders.filter(n => n.remind_at * 1000 <= Date.now() && !fired.has(n.id + ":" + n.remind_at));
   for (const n of due) {
     fired.add(n.id + ":" + n.remind_at);

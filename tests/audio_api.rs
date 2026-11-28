@@ -113,6 +113,7 @@ async fn audio_upload_ranges_and_isolation() {
     // the card is a media card listing the audio
     let (_, _, b) = a.req("GET", "/api/notes", Some("alice"), &[], vec![]).await;
     let list: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    let list = &list["notes"];
     assert_eq!(list[0]["kind"], "media");
     assert_eq!(list[0]["attachments"][0]["mime"], "audio/wav");
     std::fs::remove_dir_all(&a.media).ok();

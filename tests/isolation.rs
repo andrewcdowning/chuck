@@ -154,10 +154,10 @@ async fn attack(a: &App, user: &str, f: &Fixture) {
         let r = a.call("GET", &format!("/api/notes{q}"), user, None).await;
         assert_eq!(r.0, StatusCode::OK);
         no_mark(&r, &format!("{user} GET /api/notes{q}"));
-        assert_eq!(serde_json::from_slice::<Value>(&r.2).unwrap().as_array().unwrap().len(), 0, "{user} saw cards with {q}");
+        assert_eq!(serde_json::from_slice::<Value>(&r.2).unwrap()["notes"].as_array().unwrap().len(), 0, "{user} saw cards with {q}");
     }
     let r = a.call("GET", "/api/tags", user, None).await;
-    assert_eq!(text(&r), "[]", "{user} saw Alice's tags");
+    assert_eq!(text(&r), r#"{"tags":[]}"#, "{user} saw Alice's tags");
     for q in ["", &format!("?q={MARK}"), "?tag=alicetag", "?reminders=true"] {
         let r = a.call("GET", &format!("/api/export{q}"), user, None).await;
         no_mark(&r, &format!("{user} GET /api/export{q}"));
@@ -169,7 +169,7 @@ async fn attack(a: &App, user: &str, f: &Fixture) {
     let v: Value = serde_json::from_slice(&r.2).unwrap();
     assert_eq!((v["tagged_notes"].as_i64(), v["suggestions"].as_array().map(Vec::len)), (Some(0), Some(0)), "{user} got suggestions from Alice's tags");
     // rules
-    assert_eq!(text(&a.call("GET", "/api/rules", user, None).await), "[]");
+    assert_eq!(text(&a.call("GET", "/api/rules", user, None).await), r#"{"rules":[]}"#);
     assert_eq!(a.json("POST", "/api/rules/apply", user, None).await.1["changed"], 0);
     assert_eq!(a.call("DELETE", &format!("/api/rules/{}", f.rule), user, None).await.0, StatusCode::NOT_FOUND);
     // changing and deleting her cards
@@ -206,12 +206,12 @@ async fn attack(a: &App, user: &str, f: &Fixture) {
 async fn alice_is_intact(a: &App, f: &Fixture) {
     let (s, v) = a.json("GET", "/api/notes?limit=200", "alice", None).await;
     assert_eq!(s, StatusCode::OK);
-    let notes = v.as_array().unwrap();
+    let notes = v["notes"].as_array().unwrap();
     assert_eq!(notes.len(), 3);
     assert!(notes.iter().all(|n| n["body"].as_str().unwrap().contains(MARK)), "a card was changed");
     let note = notes.iter().find(|n| n["id"] == f.note).unwrap();
     assert_eq!(note["attachments"].as_array().unwrap().len(), 2);
-    assert_eq!(a.json("GET", "/api/rules", "alice", None).await.1.as_array().unwrap().len(), 1);
+    assert_eq!(a.json("GET", "/api/rules", "alice", None).await.1["rules"].as_array().unwrap().len(), 1);
     for id in [f.image, f.audio] {
         assert_eq!(a.call("GET", &format!("/api/media/{id}"), "alice", None).await.0, StatusCode::OK);
     }
@@ -247,7 +247,7 @@ async fn admins_see_accounts_but_never_content() {
     // the account list carries counts and sizes, and nothing else
     let r = a.call("GET", "/api/admin/users", "root", None).await;
     no_mark(&r, "admin user list");
-    let list: Vec<Value> = serde_json::from_slice(&r.2).unwrap();
+    let list: Vec<Value> = serde_json::from_slice::<Value>(&r.2).unwrap()["users"].as_array().unwrap().clone();
     let alice = list.iter().find(|u| u["id"] == "alice").unwrap();
     assert_eq!((alice["notes"].as_i64(), alice["attachments"].as_i64()), (Some(3), Some(2)));
     let mut keys: Vec<&str> = alice.as_object().unwrap().keys().map(String::as_str).collect();
@@ -287,10 +287,10 @@ async fn admins_see_accounts_but_never_content() {
     assert_eq!(a.files(), 3, "alice's picture and audio, bob's picture");
     assert_eq!(a.call("POST", "/api/admin/users/delete", "root", Some(json!({ "id": "alice" }))).await.0, StatusCode::NO_CONTENT);
     assert_eq!(a.files(), 1, "only bob's file remains");
-    assert_eq!(a.json("GET", "/api/notes", "alice", None).await.1.as_array().unwrap().len(), 0, "signing in again starts an empty account");
-    assert_eq!(a.json("GET", "/api/notes", "bob", None).await.1.as_array().unwrap().len(), 1);
+    assert_eq!(a.json("GET", "/api/notes", "alice", None).await.1["notes"].as_array().unwrap().len(), 0, "signing in again starts an empty account");
+    assert_eq!(a.json("GET", "/api/notes", "bob", None).await.1["notes"].as_array().unwrap().len(), 1);
     let (_, list) = a.json("GET", "/api/admin/users", "root", None).await;
-    assert_eq!(list.as_array().unwrap().iter().find(|u| u["id"] == "alice").unwrap()["notes"], 0);
+    assert_eq!(list["users"].as_array().unwrap().iter().find(|u| u["id"] == "alice").unwrap()["notes"], 0);
     std::fs::remove_dir_all(&a.media).ok();
 }
 
@@ -332,8 +332,8 @@ async fn my_data_export_and_account_deletion() {
     alice_is_intact(&a, &f).await;
     assert_eq!(a.call("DELETE", "/api/me", "alice", Some(json!({ "confirm": "alice" }))).await.0, StatusCode::NO_CONTENT);
     assert_eq!(a.files(), 0, "her files are gone");
-    assert_eq!(a.json("GET", "/api/notes", "alice", None).await.1.as_array().unwrap().len(), 0);
-    assert_eq!(a.json("GET", "/api/notes", "bob", None).await.1.as_array().unwrap().len(), 1, "bob untouched");
+    assert_eq!(a.json("GET", "/api/notes", "alice", None).await.1["notes"].as_array().unwrap().len(), 0);
+    assert_eq!(a.json("GET", "/api/notes", "bob", None).await.1["notes"].as_array().unwrap().len(), 1, "bob untouched");
     // with no identity there is no account to delete
     assert_eq!(a.raw("DELETE", "/api/me", None, &[("content-type", "application/json")], br#"{"confirm":"x"}"#.to_vec()).await.0, StatusCode::UNAUTHORIZED);
     std::fs::remove_dir_all(&a.media).ok();

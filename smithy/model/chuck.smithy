@@ -83,9 +83,6 @@ structure InternalError {
 
 // ---------- shapes ----------
 
-/// A JSON value. Used where the API returns a bare array, which Smithy cannot bind to a payload.
-document Document
-
 /// Unix seconds.
 long Timestamp
 
@@ -339,10 +336,8 @@ operation ListNotes {
         offset: Integer
     }
     output := {
-        /// A bare JSON array (Smithy cannot model one, so it is a document): Note objects.
-        @httpPayload
         @required
-        notes: Document
+        notes: NoteList
     }
     errors: [Unauthorized, InternalError]
 }
@@ -458,10 +453,8 @@ blob MarkdownBlob
 @http(method: "GET", uri: "/api/tags")
 operation ListTags {
     output := {
-        /// A bare JSON array (Smithy cannot model one, so it is a document): TagCount objects.
-        @httpPayload
         @required
-        tags: Document
+        tags: TagCountList
     }
     errors: [Unauthorized, InternalError]
 }
@@ -524,10 +517,8 @@ operation SuggestionFeedback {
 @http(method: "GET", uri: "/api/rules")
 operation ListRules {
     output := {
-        /// A bare JSON array (Smithy cannot model one, so it is a document): Rule objects.
-        @httpPayload
         @required
-        rules: Document
+        rules: RuleList
     }
     errors: [Unauthorized, InternalError]
 }
@@ -735,10 +726,8 @@ operation DeleteMe {
 @http(method: "GET", uri: "/api/admin/users")
 operation ListUsers {
     output := {
-        /// A bare JSON array (Smithy cannot model one, so it is a document): UserSummary objects.
-        @httpPayload
         @required
-        users: Document
+        users: UserSummaryList
     }
     errors: [Unauthorized, Forbidden, InternalError]
 }

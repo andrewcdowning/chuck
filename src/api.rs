@@ -193,13 +193,13 @@ async fn remove(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) ->
 async fn list(State(s): State<AppState>, h: HeaderMap, Query(q): Query<NoteQuery>) -> Result<impl IntoResponse, ApiError> {
     let o = owner(&s, &h).await?;
     let st = s.store.clone();
-    Ok(Json(blocking(move || st.list(&o, &q)).await?))
+    Ok(Json(serde_json::json!({ "notes": blocking(move || st.list(&o, &q)).await? })))
 }
 
 async fn tags(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
     let o = owner(&s, &h).await?;
     let st = s.store.clone();
-    Ok(Json(blocking(move || st.tags(&o)).await?))
+    Ok(Json(serde_json::json!({ "tags": blocking(move || st.tags(&o)).await? })))
 }
 
 #[derive(Deserialize)]
@@ -239,7 +239,7 @@ async fn suggestion_feedback(State(s): State<AppState>, h: HeaderMap, Json(b): J
 async fn rules(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
     let o = owner(&s, &h).await?;
     let st = s.store.clone();
-    Ok(Json(blocking(move || st.rules(&o)).await?))
+    Ok(Json(serde_json::json!({ "rules": blocking(move || st.rules(&o)).await? })))
 }
 
 async fn add_rule(State(s): State<AppState>, h: HeaderMap, Json(b): Json<RuleInput>) -> Result<impl IntoResponse, ApiError> {
@@ -637,7 +637,7 @@ async fn erase_account(s: &AppState, id: &str) -> Result<(), ApiError> {
 async fn admin_users(State(s): State<AppState>, h: HeaderMap) -> Result<impl IntoResponse, ApiError> {
     admin(&s, &h).await?;
     let st = s.store.clone();
-    Ok(Json(blocking(move || st.list_users()).await?))
+    Ok(Json(serde_json::json!({ "users": blocking(move || st.list_users()).await? })))
 }
 
 #[derive(Deserialize)]

@@ -15,7 +15,7 @@
                         "content": {
                             "application/json": {
                                 "schema": {
-                                    "$ref": "#/components/schemas/ListUsersOutputPayload"
+                                    "$ref": "#/components/schemas/ListUsersResponseContent"
                                 }
                             }
                         }
@@ -737,7 +737,7 @@
                         "content": {
                             "application/json": {
                                 "schema": {
-                                    "$ref": "#/components/schemas/ListNotesOutputPayload"
+                                    "$ref": "#/components/schemas/ListNotesResponseContent"
                                 }
                             }
                         }
@@ -1148,7 +1148,7 @@
                         "content": {
                             "application/json": {
                                 "schema": {
-                                    "$ref": "#/components/schemas/ListRulesOutputPayload"
+                                    "$ref": "#/components/schemas/ListRulesResponseContent"
                                 }
                             }
                         }
@@ -1426,7 +1426,7 @@
                         "content": {
                             "application/json": {
                                 "schema": {
-                                    "$ref": "#/components/schemas/ListTagsOutputPayload"
+                                    "$ref": "#/components/schemas/ListTagsResponseContent"
                                 }
                             }
                         }
@@ -1626,17 +1626,61 @@
                     "error"
                 ]
             },
-            "ListNotesOutputPayload": {
-                "description": "A bare JSON array (Smithy cannot model one, so it is a document): Note objects."
+            "ListNotesResponseContent": {
+                "type": "object",
+                "properties": {
+                    "notes": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/Note"
+                        }
+                    }
+                },
+                "required": [
+                    "notes"
+                ]
             },
-            "ListRulesOutputPayload": {
-                "description": "A bare JSON array (Smithy cannot model one, so it is a document): Rule objects."
+            "ListRulesResponseContent": {
+                "type": "object",
+                "properties": {
+                    "rules": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/Rule"
+                        }
+                    }
+                },
+                "required": [
+                    "rules"
+                ]
             },
-            "ListTagsOutputPayload": {
-                "description": "A bare JSON array (Smithy cannot model one, so it is a document): TagCount objects."
+            "ListTagsResponseContent": {
+                "type": "object",
+                "properties": {
+                    "tags": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/TagCount"
+                        }
+                    }
+                },
+                "required": [
+                    "tags"
+                ]
             },
-            "ListUsersOutputPayload": {
-                "description": "A bare JSON array (Smithy cannot model one, so it is a document): UserSummary objects."
+            "ListUsersResponseContent": {
+                "type": "object",
+                "properties": {
+                    "users": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/UserSummary"
+                        }
+                    }
+                },
+                "required": [
+                    "users"
+                ]
             },
             "MoveNoteRequestContent": {
                 "type": "object",
@@ -1889,6 +1933,21 @@
                     "tagged_notes"
                 ]
             },
+            "TagCount": {
+                "type": "object",
+                "properties": {
+                    "tag": {
+                        "type": "string"
+                    },
+                    "count": {
+                        "type": "number"
+                    }
+                },
+                "required": [
+                    "count",
+                    "tag"
+                ]
+            },
             "TooLargeResponseContent": {
                 "type": "object",
                 "properties": {
@@ -1940,6 +1999,51 @@
                     "id",
                     "role",
                     "status"
+                ]
+            },
+            "UserSummary": {
+                "type": "object",
+                "description": "What an administrator sees about an account: counts and sizes, never content.",
+                "properties": {
+                    "id": {
+                        "type": "string"
+                    },
+                    "display_name": {
+                        "type": "string"
+                    },
+                    "role": {
+                        "$ref": "#/components/schemas/Role"
+                    },
+                    "status": {
+                        "$ref": "#/components/schemas/AccountStatus"
+                    },
+                    "created_at": {
+                        "type": "number",
+                        "description": "Unix seconds."
+                    },
+                    "last_seen_at": {
+                        "type": "number",
+                        "description": "Unix seconds."
+                    },
+                    "notes": {
+                        "type": "number"
+                    },
+                    "attachments": {
+                        "type": "number"
+                    },
+                    "storage_bytes": {
+                        "type": "number",
+                        "description": "Total size of the account's stored files (previews not counted)."
+                    }
+                },
+                "required": [
+                    "attachments",
+                    "created_at",
+                    "id",
+                    "notes",
+                    "role",
+                    "status",
+                    "storage_bytes"
                 ]
             }
         }
