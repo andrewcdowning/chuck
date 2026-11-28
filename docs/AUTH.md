@@ -28,6 +28,15 @@ every request. An administrator can see each account's counts and storage size, 
 (never their own account). A disabled account gets 401 "this account is disabled" on every endpoint. Chuck logs a
 warning at start-up if no administrator is configured.
 
+Requests are authenticated once, at the edge, and the account is looked up once per `CHUCK_ACCOUNT_CACHE_SECS` seconds
+(default 30). Disabling or deleting an account takes effect at once in the process that did it, and within that many
+seconds on any other process running against the same database. Set it to 0 to read the account on every request.
+
+Deleting an account is a two-step command. The account is first marked `deleting` and refused on every request (401 "this
+account is being deleted"); then its files and records are erased; only then is the account removed. If the erase fails,
+the account stays `deleting` in the administrator list, and deleting it again finishes the job. A `deleting` account
+cannot be enabled.
+
 Users can export everything they own (`GET /api/me/export`, a ZIP) and delete their own account (`DELETE /api/me` with
 `{"confirm": "<own id>"}`). A deleted account is erased completely; signing in again creates a new empty account, so to
 keep someone out, disable the account instead.

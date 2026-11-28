@@ -154,7 +154,7 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 
 /// Synchronous on purpose: callers run it inside `spawn_blocking`.
 /// A network-backed store can use its own runtime handle internally.
-pub trait NoteStore: Send + Sync + 'static {
+pub trait NoteStore: crate::control::AccountRecords + crate::control::OwnerRecords + Send + Sync + 'static {
     fn create(&self, owner: &str, input: &NoteInput) -> Result<Note>;
     fn update(&self, owner: &str, id: i64, input: &NoteInput) -> Result<Note>;
     fn delete(&self, owner: &str, id: i64) -> Result<()>;
@@ -186,14 +186,6 @@ pub trait NoteStore: Send + Sync + 'static {
     /// True if any of the owner's attachments still uses this storage key (as a file or a preview).
     fn blob_referenced(&self, owner: &str, key: &str) -> Result<bool>;
 
-    // ---- accounts
-    /// Called on every authenticated request. Creates the account on first sight, keeps the role in step with the
-    /// configured admin list, remembers the display name, and records activity (at most every few minutes).
-    fn touch_user(&self, id: &str, display_name: Option<&str>, admin: bool) -> Result<User>;
-    fn list_users(&self) -> Result<Vec<UserSummary>>;
-    fn set_user_active(&self, id: &str, active: bool) -> Result<User>;
-    /// Removes the account and everything it owns. Returns the storage keys of its files so the caller can delete them.
-    fn delete_user(&self, id: &str) -> Result<Vec<String>>;
     /// The owner's accepted and dismissed tag suggestions, oldest first (part of their own data export).
     fn feedback_events(&self, owner: &str) -> Result<Vec<FeedbackEvent>>;
 }

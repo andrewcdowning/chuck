@@ -34,7 +34,7 @@ fn model_operations() -> BTreeMap<String, BTreeSet<String>> {
 #[tokio::test]
 async fn router_matches_the_smithy_model() {
     let media = std::env::temp_dir().join(format!("chuck-contract-{}", std::process::id()));
-    let state = api::AppState::new(Arc::new(SqliteStore::open(":memory:").unwrap()), Arc::new(HeaderUser), Arc::new(FsBlobStore::open(&media).unwrap()));
+    let state = api::AppState::new(Arc::new(SqliteStore::open(":memory:").unwrap()), Arc::new(HeaderUser), Arc::new(FsBlobStore::open(&media).unwrap())).with_admins(["contract"]); // admin routes are refused to everyone else before routing
     let router = api::router(state);
     let ops = model_operations();
     assert!(ops.len() >= 15, "found only {} paths in the model", ops.len());

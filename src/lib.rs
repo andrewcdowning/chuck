@@ -6,6 +6,7 @@ pub mod auth;
 pub mod blob;
 pub mod cli;
 pub mod conformance;
+pub mod control;
 pub mod domain;
 pub mod export;
 pub mod media;
@@ -32,6 +33,9 @@ pub struct Options {
     /// Administrators: owner ids allowed to manage accounts (`CHUCK_ADMINS`, comma separated). In local mode the one
     /// local user is always an administrator.
     pub admins: Vec<String>,
+    /// How long a signed-in account is reused before its record is read again (`CHUCK_ACCOUNT_CACHE_SECS`, default 30).
+    /// Disabling an account takes effect at once in this process and within this time anywhere else.
+    pub account_cache: std::time::Duration,
     pub providers: auth::Providers,
 }
 
@@ -46,6 +50,7 @@ impl Options {
             blobs: None,
             media_dir: std::env::var("CHUCK_MEDIA_DIR").ok().filter(|v| !v.is_empty()),
             admins: std::env::var("CHUCK_ADMINS").unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            account_cache: std::env::var("CHUCK_ACCOUNT_CACHE_SECS").ok().and_then(|v| v.trim().parse().ok()).map(std::time::Duration::from_secs).unwrap_or(control::DEFAULT_ACCOUNT_CACHE),
             providers: auth::Providers::default(),
         }
     }
@@ -108,7 +113,8 @@ pub async fn run(opts: Options) -> Result<(), String> {
     if admins.is_empty() {
         eprintln!("note: no administrators configured (CHUCK_ADMINS); nobody can manage accounts");
     }
-    let app = api::router(api::AppState { store, auth: cfg.auth, blobs, admins: Arc::new(admins) });
+    let state = api::AppState::new(store, cfg.auth, blobs).with_admins(admins).with_account_cache(opts.account_cache);
+    let app = api::router(state);
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("bind {addr}: {e}"))?;
     println!("chuck listening on http://{addr} (auth: {})", cfg.names.join(","));
     axum::serve(listener, app).await.map_err(|e| e.to_string())
