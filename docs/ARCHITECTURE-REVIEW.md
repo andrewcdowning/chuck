@@ -3,6 +3,9 @@
 Status: the findings below describe the code as it was when the review was written (PR #19). What has been done since,
 under [specs/service-layer.md](specs/service-layer.md):
 
+File paths in the findings are those of the code when it was reviewed; it now lives in `crates/` (see the workspace layout in the
+README).
+
 | Finding | Now |
 | --- | --- |
 | A1 one counter retrains every model | Fixed (PR #24): versions per owner, bounded cache |

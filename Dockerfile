@@ -3,7 +3,7 @@ FROM rust:1.88-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
-COPY static ./static
+COPY crates ./crates
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim

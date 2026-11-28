@@ -72,7 +72,7 @@ fn parse_model() -> Model {
 
 /// The `.route("...")` paths inside one function of src/api.rs.
 fn routes_in(fn_name: &str) -> BTreeSet<String> {
-    let src = include_str!("../src/api.rs");
+    let src = include_str!("../crates/chuck-http/src/api.rs");
     let start = src.find(&format!("pub fn {fn_name}(")).unwrap_or_else(|| panic!("src/api.rs has no {fn_name}"));
     let body = &src[start..];
     let end = body.find("\n}\n").expect("end of function");

@@ -1,24 +1,16 @@
 //! Chuck as a library. The `chuck` binary is a thin wrapper over `run`. To plug in your own authentication
 //! (or storage) without forking, depend on this crate and write your own `main`; see `examples/custom_auth.rs`.
 
-pub mod admin;
-pub mod api;
-pub mod auth;
-pub mod blob;
 pub mod cli;
-pub mod conformance;
-pub mod control;
-pub mod domain;
-pub mod export;
-pub mod media;
-pub mod mem;
-pub mod records;
-pub mod service;
-pub mod sqlite;
-pub mod store;
-pub mod tagging;
-pub mod tagmodel;
-pub mod zip;
+
+// The server is a workspace of crates (see docs/specs/service-layer.md). These re-exports keep the module paths the
+// library has always had, so `chuck::store::NoteStore` and `chuck::api::router` still work.
+pub use chuck_control as control;
+pub use chuck_core::{domain, export, media, tagging, zip};
+pub use chuck_data::{blob, note_service_methods, owner, records, service, store, tag_service_methods, tagmodel};
+pub use chuck_http::{api, auth};
+pub use chuck_mgmt as admin;
+pub use chuck_store_sqlite as sqlite;
 
 use std::sync::Arc;
 
@@ -26,7 +18,7 @@ pub struct Options {
     pub db: String,
     pub addr: String,
     /// Replaces the default SQLite store when set.
-    pub store: Option<Arc<dyn store::NoteStore>>,
+    pub store: Option<Arc<dyn control::Store>>,
     /// Replaces the default attachment folder when set (for example with an S3 store).
     pub blobs: Option<Arc<dyn blob::BlobStore>>,
     /// Folder for attachments; defaults to `<database name>-media` beside the database.
@@ -73,7 +65,7 @@ impl Options {
         self
     }
 
-    pub fn with_store(mut self, store: Arc<dyn store::NoteStore>) -> Self {
+    pub fn with_store(mut self, store: Arc<dyn control::Store>) -> Self {
         self.store = Some(store);
         self
     }
@@ -90,7 +82,7 @@ impl Options {
 }
 
 pub async fn run(opts: Options) -> Result<(), String> {
-    let store: Arc<dyn store::NoteStore> = match opts.store {
+    let store: Arc<dyn control::Store> = match opts.store {
         Some(s) => s,
         None => Arc::new(sqlite::SqliteStore::open(&opts.db).map_err(|e| format!("open database: {e:?}"))?),
     };

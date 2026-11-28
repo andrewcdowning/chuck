@@ -1,6 +1,6 @@
 //! Markdown export. Pure functions so any `NoteStore` can be exported the same way.
 
-use crate::store::Note;
+use crate::model::Note;
 
 /// Days since 1970-01-01 to (year, month, day), proleptic Gregorian (Howard Hinnant's algorithm).
 pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {

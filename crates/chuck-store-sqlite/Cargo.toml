@@ -1,0 +1,12 @@
+[package]
+name = "chuck-store-sqlite"
+version = "0.1.0"
+edition = "2021"
+description = "SQLite storage backend for Chuck."
+publish = false
+
+[dependencies]
+rusqlite = { workspace = true }
+chuck-core = { path = "../chuck-core" }
+chuck-data = { path = "../chuck-data" }
+chuck-control = { path = "../chuck-control" }

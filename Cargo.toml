@@ -3,18 +3,37 @@ name = "chuck"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+# The server is a workspace of crates, one per plane plus the edge and the storage backend. This package is the binary and
+# the library that ties them together; it re-exports the old module paths (`chuck::store`, `chuck::api`, ...).
+[workspace]
+members = ["crates/*"]
+# `cargo test` and `cargo build` at the top cover every crate, not just this package
+default-members = [".", "crates/*"]
+
+[workspace.dependencies]
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
-tower-http = { version = "0.5", features = ["trace"] }
 jsonwebtoken = "9"
 base64 = "0.22"
 ureq = "2"
 sha2 = "0.10"
 
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chuck-core = { path = "crates/chuck-core" }
+chuck-data = { path = "crates/chuck-data" }
+chuck-control = { path = "crates/chuck-control" }
+chuck-mgmt = { path = "crates/chuck-mgmt" }
+chuck-store-sqlite = { path = "crates/chuck-store-sqlite" }
+chuck-http = { path = "crates/chuck-http" }
+
 [dev-dependencies]
+chuck-testkit = { path = "crates/chuck-testkit" }
+rusqlite = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

@@ -415,7 +415,7 @@ fn every_route_has_an_isolation_test() {
         "/api/admin/users/delete",
         "/api/admin/maintenance/sweep",
     ];
-    let src = include_str!("../src/api.rs");
+    let src = include_str!("../crates/chuck-http/src/api.rs");
     let routes: Vec<&str> = src.split(".route(").skip(1).filter_map(|r| r.trim_start().strip_prefix('"')).map(|r| r.split('"').next().unwrap()).collect();
     assert!(routes.len() >= COVERED.len() - 2, "found only {} routes, is the router still in src/api.rs?", routes.len());
     for r in &routes {

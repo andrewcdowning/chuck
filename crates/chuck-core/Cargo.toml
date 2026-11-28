@@ -1,0 +1,10 @@
+[package]
+name = "chuck-core"
+version = "0.1.0"
+edition = "2021"
+description = "The shared types and pure rules of Chuck."
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

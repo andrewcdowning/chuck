@@ -3,7 +3,7 @@
 use chuck::admin::{sweep_orphans, AdminError, AdminService, SWEEP_GRACE_SECS};
 use chuck::blob::{key_for, BlobStore, FsBlobStore, MemBlobStore};
 use chuck::control::{AccountRecords, AccountService, AccountStatus, OwnerPurger, OwnerRecords, Principal, Role};
-use chuck::mem::MemStore;
+use chuck_testkit::mem::MemStore;
 use chuck::store::{NewAttachment, NoteInput, NoteStore, StoreError};
 use std::sync::Arc;
 

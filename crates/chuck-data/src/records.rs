@@ -9,8 +9,8 @@
 //! Every method takes the owner and must behave as if other owners' records do not exist: an id that belongs to someone
 //! else is the same as an id that does not exist.
 
-use crate::domain::order::Slot;
-use crate::domain::schedule::Schedule;
+use chuck_core::domain::order::Slot;
+use chuck_core::domain::schedule::Schedule;
 use crate::store::{Attachment, NewAttachment, Result, Rule, TagCount};
 
 /// A card as stored. `open_todos` and `position` are what ordering needs; the service computes and maintains them.

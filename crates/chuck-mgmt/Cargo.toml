@@ -1,0 +1,12 @@
+[package]
+name = "chuck-mgmt"
+version = "0.1.0"
+edition = "2021"
+description = "Chuck management plane: administration and maintenance."
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+chuck-core = { path = "../chuck-core" }
+chuck-data = { path = "../chuck-data" }
+chuck-control = { path = "../chuck-control" }

@@ -33,6 +33,22 @@ Everything is a card with a `kind`: `note`, `todo` (a card with `- [ ]` items, s
 - `auth::Authenticator`: returns the owner id per request. Built in: `local`, `token`, `header` (trusted proxy header), `jwt` (OIDC/ALB/Cognito). Your own provider (a company SSO, a CDN signer, anything) plugs in from your repo without forking: see [docs/AUTH.md](docs/AUTH.md) and `examples/custom_auth.rs`. Every store call is scoped by owner.
 - `api.rs`: thin JSON API (`/api/notes`, `/api/tags`, `/healthz`). Capture clients (CLI, browser extension, hotkey) only need these endpoints.
 
+## Layout
+
+A Cargo workspace; the top-level `chuck` package is the binary and re-exports the old module paths.
+
+| Crate | What it is |
+| --- | --- |
+| `crates/chuck-core` | Shared types and the pure rules (cards, tags, ordering, search terms, validation), tag-learning maths |
+| `crates/chuck-data` | Data plane: card, tag, rule, file and suggestion services over thin storage traits |
+| `crates/chuck-control` | Control plane: accounts, `Principal`, the account cache, deletion as a command |
+| `crates/chuck-mgmt` | Management plane: administration and the unused-file sweeper |
+| `crates/chuck-store-sqlite` | The SQLite backend, with numbered schema migrations |
+| `crates/chuck-http` | The HTTP edge: routers per plane, authentication providers, the page |
+| `crates/chuck-testkit` | Conformance suite and in-memory backend, for tests |
+
+`cargo test` runs every crate's tests.
+
 ## Design notes
 
 - [docs/ARCHITECTURE-REVIEW.md](docs/ARCHITECTURE-REVIEW.md): review findings and how the store depends on SQLite.

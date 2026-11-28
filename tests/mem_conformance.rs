@@ -1,12 +1,12 @@
 //! The same behaviour contract as SQLite, run against the in-memory reference backend. Every card, tag, rule and
 //! attachment case must pass here too, which shows that all of that behaviour lives in `NoteService`, not in a backend.
 
-use chuck::conformance as c;
-use chuck::mem::MemStore;
-use chuck::store::NoteStore;
+use chuck_testkit::conformance as c;
+use chuck_testkit::mem::MemStore;
+use chuck::control::Store;
 use std::sync::Arc;
 
-fn make() -> Arc<dyn NoteStore> {
+fn make() -> Arc<dyn Store> {
     Arc::new(MemStore::new())
 }
 
@@ -38,7 +38,7 @@ cases!(
 
 #[test]
 fn every_case_runs_here() {
-    let src = include_str!("../src/conformance.rs");
+    let src = include_str!("../crates/chuck-testkit/src/conformance.rs");
     for n in src.lines().filter_map(|l| l.strip_prefix("pub fn ")).filter_map(|l| l.split('(').next()) {
         if matches!(n, "run_all" | "run_notes") {
             continue;
@@ -56,7 +56,7 @@ fn run_notes_passes() {
 fn a_failed_unit_of_work_changes_nothing() {
     use chuck::records::{NoteRecords, RecordTx};
     use chuck::store::StoreError;
-    let r = chuck::mem::MemRecords::new();
+    let r = chuck_testkit::mem::MemRecords::new();
     let out: Result<(), StoreError> = r.transact(|tx: &mut dyn RecordTx| {
         tx.insert_rule("me", "a", "b", 0)?;
         Err(StoreError::Invalid("stop".into()))
